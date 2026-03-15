@@ -1,0 +1,306 @@
+name: Build
+
+on:
+  push:
+    branches: [ main, dev ]
+    tags:
+      - '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9].*'
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: write
+
+# Dependency versions - update these to bust the cache
+env:
+  OPENSSL_VERSION: "3.6.1"
+  LIBSSH2_VERSION: "1.11.1"
+  SDL2_VERSION: "2.32.10"
+  LRZSZ_VERSION: "0.12.20"
+  SDL2_TTF_VERSION: "2.22.0"
+  TERMINUS_VERSION: "4.49.3"
+  DEPS_CACHE_REV: "2"
+
+# ─────────────────────────────────────────────────────────────────────────────
+jobs:
+
+  # ───────────────────────────────────────────────────────────────────────────
+  verify-version:
+    name: Verify version matches tag
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check source version matches tag
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          SRC=$(grep 'photonterm_version = "PhotonTERM' src/photonterm/photon_main.c \
+                | sed 's/.*PhotonTERM \([^"]*\)".*/\1/' | head -1)
+          echo "Tag:    $TAG"
+          echo "Source: $SRC"
+          if [ "$TAG" != "$SRC" ]; then
+            echo ""
+            echo "ERROR: Tag $TAG does not match source version $SRC"
+            echo "Run scripts/release.sh to prepare a release properly."
+            exit 1
+          fi
+          echo "Version match: $TAG"
+
+  # ───────────────────────────────────────────────────────────────────────────
+  linux:
+  # ───────────────────────────────────────────────────────────────────────────
+    name: Linux (${{ matrix.arch }})
+    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    needs: [verify-version]
+    if: always() && (needs.verify-version.result == 'success' || needs.verify-version.result == 'skipped')
+    strategy:
+      matrix:
+        arch: [x86_64, aarch64]
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake pkg-config \
+            libx11-dev libxext-dev \
+            zlib1g-dev
+
+      - name: Cache deps
+        id: cache-deps
+        uses: actions/cache@v5
+        with:
+          path: 3rdp/prefix
+          key: deps-linux-${{ matrix.arch }}-openssl${{ env.OPENSSL_VERSION }}-libssh2${{ env.LIBSSH2_VERSION }}-sdl2${{ env.SDL2_VERSION }}-sdl2ttf${{ env.SDL2_TTF_VERSION }}-lrzsz${{ env.LRZSZ_VERSION }}-rev${{ env.DEPS_CACHE_REV }}
+
+      - name: Build deps
+        if: steps.cache-deps.outputs.cache-hit != 'true'
+        run: bash scripts/build-deps.sh all
+
+      - name: Build
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$(pwd)/3rdp/prefix" \
+            -Wno-dev
+          cmake --build build --parallel $(nproc)
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp build/src/photonterm/photonterm dist/
+          if [ -f 3rdp/prefix/bin/lsz ]; then
+            cp 3rdp/prefix/bin/lsz dist/sz
+            cp 3rdp/prefix/bin/lrz dist/rz
+          fi
+          tar -czf photonterm-linux-${{ matrix.arch }}.tar.gz -C dist .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: photonterm-linux-${{ matrix.arch }}
+          path: photonterm-linux-${{ matrix.arch }}.tar.gz
+          if-no-files-found: warn
+
+  # ───────────────────────────────────────────────────────────────────────────
+  macos:
+  # ───────────────────────────────────────────────────────────────────────────
+    name: macOS (arm64)
+    runs-on: macos-latest
+    needs: [verify-version]
+    if: always() && (needs.verify-version.result == 'success' || needs.verify-version.result == 'skipped')
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install build tools
+        run: |
+          brew install cmake pkg-config
+
+      - name: Cache deps
+        id: cache-deps
+        uses: actions/cache@v5
+        with:
+          path: 3rdp/prefix
+          key: deps-macos-arm64-openssl${{ env.OPENSSL_VERSION }}-libssh2${{ env.LIBSSH2_VERSION }}-sdl2${{ env.SDL2_VERSION }}-sdl2ttf${{ env.SDL2_TTF_VERSION }}-lrzsz${{ env.LRZSZ_VERSION }}-rev${{ env.DEPS_CACHE_REV }}
+
+      - name: Build deps
+        if: steps.cache-deps.outputs.cache-hit != 'true'
+        run: bash scripts/build-deps.sh all
+
+      - name: Build
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$(pwd)/3rdp/prefix" \
+            -Wno-dev
+          cmake --build build --parallel $(sysctl -n hw.logicalcpu)
+
+      - name: Locate app bundle
+        run: echo "APP=$(pwd)/build/src/photonterm/PhotonTERM.app" >> $GITHUB_ENV
+
+      - name: Sign (Developer ID - pushes to main and tags)
+        if: >
+          github.event_name == 'push' &&
+          (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))
+        env:
+          APPLE_CERT_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_DEVELOPER_ID: ${{ secrets.APPLE_DEVELOPER_ID }}
+        run: |
+          [ -z "$APPLE_DEVELOPER_ID" ] && echo "No signing identity configured, skipping." && exit 0
+          KEYCHAIN=$RUNNER_TEMP/build.keychain
+          security create-keychain -p "" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "" "$KEYCHAIN"
+          echo "$APPLE_CERT_P12" | base64 --decode > /tmp/cert.p12
+          security import /tmp/cert.p12 -k "$KEYCHAIN" -P "$APPLE_CERT_PASSWORD" \
+            -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          rm /tmp/cert.p12
+          codesign --force --deep --sign "$APPLE_DEVELOPER_ID" \
+            --options runtime --timestamp \
+            --entitlements src/photonterm/PhotonTERM.entitlements \
+            "$APP"
+          codesign --verify --verbose "$APP"
+          echo "Signed successfully"
+
+      - name: Notarize (tags only)
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          APPLE_NOTARIZE_APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_NOTARIZE_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          [ -z "$APPLE_NOTARIZE_APPLE_ID" ] && echo "No notarization credentials configured, skipping." && exit 0
+          ditto -c -k --keepParent "$APP" /tmp/PhotonTERM-notarize.zip
+          xcrun notarytool submit /tmp/PhotonTERM-notarize.zip \
+            --apple-id "$APPLE_NOTARIZE_APPLE_ID" \
+            --password "$APPLE_NOTARIZE_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+          xcrun stapler staple "$APP"
+          echo "Notarized and stapled"
+
+      - name: Package DMG (tags only)
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          hdiutil create -volname "PhotonTERM" \
+            -srcfolder "$APP" \
+            -ov -format UDZO \
+            "PhotonTERM-${VERSION}.dmg"
+          echo "DMG_PATH=PhotonTERM-${VERSION}.dmg" >> $GITHUB_ENV
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+
+      - name: Package app as zip
+        run: |
+          ditto -c -k --keepParent "$APP" /tmp/PhotonTERM-macos-arm64.zip
+          echo "ZIP_PATH=/tmp/PhotonTERM-macos-arm64.zip" >> $GITHUB_ENV
+
+      - name: Upload app artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: photonterm-macos-arm64
+          path: ${{ env.ZIP_PATH }}
+          if-no-files-found: warn
+
+      - name: Upload DMG artifact (tags only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/upload-artifact@v7
+        with:
+          name: photonterm-macos-dmg
+          path: ${{ env.DMG_PATH }}
+          if-no-files-found: error
+
+  # ───────────────────────────────────────────────────────────────────────────
+  windows:
+  # ───────────────────────────────────────────────────────────────────────────
+    name: Windows (x86_64)
+    runs-on: windows-latest
+    needs: [verify-version]
+    if: always() && (needs.verify-version.result == 'success' || needs.verify-version.result == 'skipped')
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-pkg-config
+            mingw-w64-x86_64-zlib
+            make
+
+      - name: Cache deps
+        id: cache-deps
+        uses: actions/cache@v5
+        with:
+          path: 3rdp/prefix
+          key: deps-windows-x86_64-openssl${{ env.OPENSSL_VERSION }}-libssh2${{ env.LIBSSH2_VERSION }}-sdl2${{ env.SDL2_VERSION }}-sdl2ttf${{ env.SDL2_TTF_VERSION }}-lrzsz${{ env.LRZSZ_VERSION }}-rev${{ env.DEPS_CACHE_REV }}
+
+      - name: Build deps
+        if: steps.cache-deps.outputs.cache-hit != 'true'
+        run: bash scripts/build-deps.sh all
+
+      - name: Build
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$(pwd)/3rdp/prefix" \
+            -DCMAKE_TOOLCHAIN_FILE="" \
+            -Wno-dev \
+            -G "Ninja"
+          cmake --build build --parallel $(nproc)
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: photonterm-windows-x86_64
+          path: build/src/photonterm/photonterm.exe
+          if-no-files-found: warn
+
+  # ───────────────────────────────────────────────────────────────────────────
+  release:
+  # ───────────────────────────────────────────────────────────────────────────
+    name: Create GitHub Release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [verify-version, linux, macos, windows]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts/
+
+      - name: List artifacts
+        run: find artifacts/ -type f | sort
+
+      - name: Prepare release assets
+        run: |
+          cd artifacts
+          # Linux already comes as tar.gz
+          # macOS has the zip and dmg
+          # Windows - zip the exe
+          for dir in photonterm-windows-*; do
+            [ -d "$dir" ] || continue
+            zip -r "${dir}.zip" "$dir"
+          done
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/photonterm-linux-*/*.tar.gz
+            artifacts/photonterm-windows-*.zip
+            artifacts/photonterm-macos-arm64/*.zip
+            artifacts/photonterm-macos-dmg/*.dmg
+          generate_release_notes: true

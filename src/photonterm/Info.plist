@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple Computer//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>English</string>
+
+	<key>CFBundleExecutable</key>
+	<string>photonterm</string>
+
+	<key>CFBundleIconFile</key>
+	<string>PhotonTERM</string>
+
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+
+	<key>CFBundleDisplayName</key>
+	<string>PhotonTERM</string>
+
+	<key>CFBundleName</key>
+	<string>PhotonTERM</string>
+
+	<key>CFBundleShortVersionString</key>
+	<string>20260315.1</string>
+
+	<key>CFBundleGetInfoString</key>
+	<string>An ANSI-BBS terminal which supports telnet and SSH</string>
+
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+
+	<key>CFBundleSignature</key>
+	<string>????</string>
+
+	<key>CFBundleIdentifier</key>
+	<string>org.fewtarius.photonterm</string>
+
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>CFBundleURLName</key>
+			<string>SSH</string>
+			<key>CFBundleURLIconFile</key>
+			<string>PhotonTERM</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>ssh</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>CFBundleURLName</key>
+			<string>Telnet</string>
+			<key>CFBundleURLIconFile</key>
+			<string>PhotonTERM</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>telnet</string>
+			</array>
+		</dict>
+	</array>
+
+	<key>CFBundleVersion</key>
+	<string>20260315.1</string>
+
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+
+	<key>NSApplicationIcon</key>
+	<string>PhotonTERM</string>
+
+	<key>NSHumanReadableCopyright</key>
+	<string>Copyright 2025-2026, PhotonTERM contributors.</string>
+
+	<key>NSHighResolutionCapable</key> <true/>
+
+	<key>NSSupportsAutomaticGraphicsSwitching</key> <true/>
+</dict>
+</plist>

@@ -1,0 +1,150 @@
+name: Update Homebrew Cask
+
+# Triggers when the build workflow completes. The job itself checks whether
+# a DMG release asset exists (only present on version tag builds) and exits
+# cleanly if not - so non-tag pushes are a no-op.
+on:
+  workflow_run:
+    workflows: ["Build"]
+    types:
+      - completed
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag to update (e.g., 20260314.1)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  update-cask:
+    name: Update PhotonTERM Homebrew cask
+    runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+
+    steps:
+      - name: Extract version
+        id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            VERSION="$INPUT_VERSION"
+          else
+            # For tag-triggered workflow_run, head_branch is the tag name
+            VERSION="$HEAD_BRANCH"
+          fi
+          if [ -z "$VERSION" ]; then
+            echo "Could not determine version - skipping"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Version: $VERSION"
+
+      - name: Get DMG asset URL
+        id: asset
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const version = '${{ steps.version.outputs.version }}';
+
+            // Try to find a release for this tag. Non-tag pushes won't have one.
+            let release;
+            try {
+              const resp = await github.rest.repos.getReleaseByTag({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag: version,
+              });
+              release = resp.data;
+            } catch (err) {
+              console.log(`No release for "${version}" - not a version tag, skipping.`);
+              core.setOutput('skip', 'true');
+              return;
+            }
+
+            const dmg = release.assets.find(a => a.name.endsWith('.dmg'));
+            if (!dmg) {
+              console.log(`No DMG asset in release ${version} - skipping.`);
+              core.setOutput('skip', 'true');
+              return;
+            }
+
+            console.log('DMG:', dmg.name);
+            console.log('URL:', dmg.browser_download_url);
+            core.setOutput('url', dmg.browser_download_url);
+            core.setOutput('skip', 'false');
+
+      - name: Download DMG and compute SHA256
+        id: hash
+        if: steps.asset.outputs.skip != 'true'
+        run: |
+          URL="${{ steps.asset.outputs.url }}"
+          echo "Downloading: $URL"
+          curl -fsSL "$URL" -o /tmp/PhotonTERM.dmg
+          SHA256=$(sha256sum /tmp/PhotonTERM.dmg | awk '{print $1}')
+          echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
+          echo "SHA256: $SHA256"
+
+      - name: Checkout fewtarius-tap
+        if: steps.asset.outputs.skip != 'true'
+        uses: actions/checkout@v6
+        with:
+          repository: fewtarius/fewtarius-tap
+          token: ${{ secrets.HOMEBREW_PAT }}
+          path: tap
+
+      - name: Update cask
+        if: steps.asset.outputs.skip != 'true'
+        working-directory: tap
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          SHA256: ${{ steps.hash.outputs.sha256 }}
+        run: |
+          CASK="Casks/photonterm.rb"
+          if [ ! -f "$CASK" ]; then
+            echo "ERROR: $CASK not found in fewtarius-tap"
+            exit 1
+          fi
+          echo "Updating $CASK"
+          echo "  Version: $VERSION"
+          echo "  SHA256:  $SHA256"
+
+          sed -i \
+            -e "s|version \"[^\"]*\"|version \"$VERSION\"|" \
+            -e "s|sha256 \"[^\"]*\"\|sha256 :no_check|sha256 \"$SHA256\"|" \
+            "$CASK"
+
+          echo "--- Updated cask (first 15 lines) ---"
+          head -15 "$CASK"
+
+      - name: Commit and push
+        if: steps.asset.outputs.skip != 'true'
+        working-directory: tap
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Casks/photonterm.rb
+          if git diff --staged --quiet; then
+            echo "No changes - cask already up to date for $VERSION"
+          else
+            git commit -m "photonterm: update to $VERSION"
+            git push
+            echo "Pushed cask update for $VERSION"
+          fi
+
+      - name: Summary
+        if: steps.asset.outputs.skip != 'true'
+        run: |
+          echo "Homebrew cask updated"
+          echo "  Version: ${{ steps.version.outputs.version }}"
+          echo "  SHA256:  ${{ steps.hash.outputs.sha256 }}"
+          echo "  https://github.com/fewtarius/fewtarius-tap"
