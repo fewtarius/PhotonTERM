@@ -5,6 +5,12 @@ It connects to bulletin board systems over Telnet and SSH with full ANSI/VT100/V
 terminal emulation, a hardware-accelerated SDL2 display, and no external runtime
 dependencies on macOS.
 
+## Screenshots
+
+![PhotonTERM BBS directory](.images/image1.png)
+
+![PhotonTERM terminal session](.images/image2.png)
+
 ## Features
 
 - **Terminal emulation** - ANSI, VT100, VT220, DEC line drawing, 256-colour and
