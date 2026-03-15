@@ -1,0 +1,25 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg" id="photonterm-logo">
+  <defs>
+    <linearGradient id="coolGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00F2FF"/>
+      <stop offset="100%" stop-color="#0053FF"/>
+    </linearGradient>
+  </defs>
+
+  <rect id="background" width="1024" height="1024" rx="160" fill="#0A192F"/>
+
+  <g id="letter-P" transform="translate(120, 300)">
+    <path d="M0 0V420H100V250H280C360 250 400 200 400 125C400 50 360 0 280 0H0ZM100 80H280C300 80 310 90 310 125C310 160 300 170 280 170H100V80Z" fill="url(#coolGradient)"/>
+    
+    <g id="terminal-caret" transform="translate(130, 105)">
+      <path d="M0 0L30 20L0 40" fill="none" stroke="white" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
+      <rect x="45" y="35" width="35" height="10" fill="white"/>
+    </g>
+  </g>
+
+  <g id="letter-T" transform="translate(560, 300)">
+    <path d="M0 0H380V80H240V420H140V80H0V0Z" fill="url(#coolGradient)"/>
+  </g>
+
+  <rect id="accent-bar" x="120" y="760" width="820" height="8" rx="4" fill="url(#coolGradient)" opacity="0.3"/>
+</svg>
