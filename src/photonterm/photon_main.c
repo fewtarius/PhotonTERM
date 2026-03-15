@@ -411,12 +411,11 @@ int main(int argc, char **argv)
             char errmsg[256];
             snprintf(errmsg, sizeof(errmsg), "Connection failed: %s",
                      photon_conn_last_error());
-            photon_ui_msg(ui, errmsg);
-            /* Remove the failed tab slot */
             close_tab(sdl, slot);
             /* Restore theme */
             photon_theme_apply(photon_active_theme, sdl, &settings);
             photon_sdl_set_ttf_mode(sdl, false);  /* reset to bitmap for UI */
+            photon_ui_msg(ui, errmsg);
             if (ntabs > 0) goto run_session;
             continue;
         }

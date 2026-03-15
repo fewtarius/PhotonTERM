@@ -479,9 +479,6 @@ static photon_sock_t tcp_connect(const char *host, uint16_t port)
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_protocol = IPPROTO_TCP;
     hints.ai_flags    = AI_NUMERICSERV;
-#ifdef AI_ADDRCONFIG
-    hints.ai_flags   |= AI_ADDRCONFIG;
-#endif
 
     struct addrinfo *res = NULL;
     if (getaddrinfo(host, portstr, &hints, &res) != 0 || !res) {

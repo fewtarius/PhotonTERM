@@ -809,7 +809,13 @@ static void execute(vte_t *v, uint8_t byte)
 {
     switch (byte) {
     case 0x08: /* BS */
-        if (v->cx > 1) { v->cx--; v->pending_wrap = false; }
+        if (v->pending_wrap) {
+            /* pending_wrap means cursor is logically after last column;
+             * backspace cancels the pending wrap, leaving cx at cols */
+            v->pending_wrap = false;
+        } else if (v->cx > 1) {
+            v->cx--;
+        }
         break;
     case 0x09: /* HT - horizontal tab */
     {
