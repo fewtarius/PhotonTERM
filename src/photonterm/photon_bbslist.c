@@ -1087,7 +1087,7 @@ static photon_bbs_t *run_directory(photon_ui_t *ui, photon_settings_t *s)
 
 /* ── Public entry point ──────────────────────────────────────────────── */
 
-photon_bbs_t *photon_bbslist_run(photon_ui_t *ui)
+photon_bbs_t *photon_bbslist_run(photon_ui_t *ui, bool start_in_directory)
 {
     /* Load settings and apply active theme */
     photon_settings_t s;
@@ -1103,45 +1103,54 @@ photon_bbs_t *photon_bbslist_run(photon_ui_t *ui)
 
     /* Splash loop */
     while (!done) {
-        draw_splash(ui);
-        photon_sdl_present(photon_ui_sdl(ui));
-
-        photon_key_t key = {0};
-        if (!photon_sdl_wait_key(photon_ui_sdl(ui), &key, 200)) continue;
-        if (key.code == 0) continue;
-
-        switch (key.code) {
-        case 'Q': case 'q': case '\x1b':
-            /* Confirm quit */
-            if (photon_ui_confirm(ui, "Quit PhotonTERM?"))
-                done = true;
-            break;
-
-        case PHOTON_KEY_QUIT:
-            done = true;
-            break;
-
-        case '\t': /* Tab -> Settings from splash */
-            {
-                /* Draw directory background first so settings overlay is readable */
-                const photon_theme_t *t = active_theme();
-                fill_rect(ui, 1, 1, W, H - 1, A_NORM(t));
-                draw_statusbar(ui, false, NULL);
-                photon_sdl_present(photon_ui_sdl(ui));
-
-                run_settings(ui, &s);
-            }
-            break;
-
-        default:
-            /* Any other key - open directory */
+        if (start_in_directory) {
+            /* Go straight to directory; if user ESCs, fall back to splash */
             result = run_directory(ui, &s);
-            if (!result) {
-                /* User pressed ESC/Q in directory - back to splash */
-            } else {
+            if (result) {
                 done = true;
+            } else {
+                /* User cancelled the directory - show splash from here on */
+                start_in_directory = false;
             }
-            break;
+        } else {
+            draw_splash(ui);
+            photon_sdl_present(photon_ui_sdl(ui));
+
+            photon_key_t key = {0};
+            if (!photon_sdl_wait_key(photon_ui_sdl(ui), &key, 200)) continue;
+            if (key.code == 0) continue;
+
+            switch (key.code) {
+            case 'Q': case 'q': case '\x1b':
+                /* Confirm quit */
+                if (photon_ui_confirm(ui, "Quit PhotonTERM?"))
+                    done = true;
+                break;
+
+            case PHOTON_KEY_QUIT:
+                done = true;
+                break;
+
+            case '\t': /* Tab -> Settings from splash */
+                {
+                    /* Draw directory background first so settings overlay is readable */
+                    const photon_theme_t *t = active_theme();
+                    fill_rect(ui, 1, 1, W, H - 1, A_NORM(t));
+                    draw_statusbar(ui, false, NULL);
+                    photon_sdl_present(photon_ui_sdl(ui));
+
+                    run_settings(ui, &s);
+                }
+                break;
+
+            default:
+                /* Any other key - open directory */
+                result = run_directory(ui, &s);
+                if (result)
+                    done = true;
+                /* else: user ESC'd from directory - loop back to splash */
+                break;
+            }
         }
     }
 

@@ -12,8 +12,12 @@
 
 /* Show the dialing directory and return a heap-allocated photon_bbs_t entry
  * for the user's selection, or NULL if the user cancelled.
- * The caller must free the result with photon_bbslist_free(). */
-photon_bbs_t *photon_bbslist_run(photon_ui_t *ui);
+ * The caller must free the result with photon_bbslist_free().
+ *
+ * If start_in_directory is true, skip the splash screen and open the
+ * directory immediately (used when returning from a disconnected session).
+ * If false, show the splash first (normal cold-start behaviour). */
+photon_bbs_t *photon_bbslist_run(photon_ui_t *ui, bool start_in_directory);
 void          photon_bbslist_free(photon_bbs_t *bbs);
 
 /* Run the settings menu overlay. Can be called from any context

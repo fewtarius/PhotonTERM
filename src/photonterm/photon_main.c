@@ -319,10 +319,12 @@ int main(int argc, char **argv)
     memset(tabs, 0, sizeof(tabs));
 
     bool running = true;
+    bool show_directory = false;  /* true = skip splash, open directory directly */
     while (running) {
 
         /* Show BBS list to pick a connection */
-        photon_bbs_t *bbs = photon_bbslist_run(ui);
+        photon_bbs_t *bbs = photon_bbslist_run(ui, show_directory);
+        show_directory = false;  /* reset: only skip splash for the next call */
         if (!bbs) {
             PHOTON_DBG("user cancelled BBS list");
             if (ntabs == 0) break;  /* no tabs open -> exit */
@@ -450,6 +452,7 @@ int main(int argc, char **argv)
                 /* Sync ui_vte to current window grid (may have been resized) */
                 vte_resize(ui_vte, photon_sdl_cols(sdl), photon_sdl_rows(sdl));
                 photon_sdl_set_ttf_mode(sdl, false);  /* reset to bitmap for UI */
+                show_directory = true;  /* return to dialer, not splash */
                 continue;
             }
             /* Repaint remaining tab */
@@ -464,6 +467,7 @@ int main(int argc, char **argv)
             photon_sdl_set_ttf_mode(sdl, false);  /* reset to bitmap for UI */
             /* Sync ui_vte to current window grid (may have been resized) */
             vte_resize(ui_vte, photon_sdl_cols(sdl), photon_sdl_rows(sdl));
+            show_directory = true;  /* open directory directly for new tab */
             continue;
 
         case PHOTON_TERM_SWITCH_TAB: {
