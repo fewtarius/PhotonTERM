@@ -146,7 +146,9 @@ OBJ := $(OBJDIR)/photon_main.o \
 
 ifeq ($(os),darwin)
   OBJ += $(OBJDIR)/DarwinWrappers.o
-else ifndef win
+else ifdef win
+  OBJ += $(OBJDIR)/photonterm_rc.o
+else
   OBJ += $(OBJDIR)/early_init.o
 endif
 
@@ -200,6 +202,10 @@ $(OBJDIR)/%.o: %.c
 $(OBJDIR)/DarwinWrappers.o: DarwinWrappers.m
 	@echo "ObjC DarwinWrappers.m"
 	$(CC) $(CFLAGS) -fobjc-arc -MMD -MP -c -o $@ $<
+
+$(OBJDIR)/photonterm_rc.o: photonterm.rc PhotonTERM.ico
+	@echo "RC photonterm.rc"
+	$(QUIET)x86_64-w64-mingw32-windres -i $< -o $@
 
 -include $(wildcard $(OBJDIR)/*.d)
 

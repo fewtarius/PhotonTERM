@@ -35,7 +35,9 @@ set(PHOTON_SOURCES
 
 if(APPLE)
     list(APPEND PHOTON_SOURCES DarwinWrappers.m)
-elseif(NOT WIN32)
+elseif(WIN32)
+    list(APPEND PHOTON_SOURCES photonterm.rc)
+else()
     list(APPEND PHOTON_SOURCES early_init.c)
 endif()
 

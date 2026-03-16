@@ -1,0 +1,8 @@
+/* PhotonTERM Windows resource script
+ *
+ * Copyright (C) 2026 fewtarius and PhotonTERM contributors
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
+/* Application icon - index 0 is used by Windows Explorer and the taskbar */
+IDI_ICON1 ICON "PhotonTERM.ico"
