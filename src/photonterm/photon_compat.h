@@ -18,6 +18,11 @@
 
 #pragma once
 
+/* ── MinGW C99-compliant printf (supports %zd, %zu, etc.) ──────────── */
+#if defined(_WIN32) && defined(__MINGW32__) && !defined(__USE_MINGW_ANSI_STDIO)
+#define __USE_MINGW_ANSI_STDIO 1
+#endif
+
 /* ── System headers ─────────────────────────────────────────────────── */
 
 #include <assert.h>

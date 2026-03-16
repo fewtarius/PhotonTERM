@@ -70,7 +70,7 @@ const char *photon_store_config_dir(void)
 
     /* Create XDG dir */
 #ifdef _WIN32
-    mkdir(xdg);
+    _mkdir(xdg);
 #else
     mkdir(xdg, 0700);
 #endif

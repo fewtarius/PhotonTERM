@@ -87,7 +87,11 @@ static inline void
 photon_debug_write(const char *file, int line, const char *func,
                    const char *fmt, ...)
 #if defined(__GNUC__) || defined(__clang__)
+#if defined(__MINGW32__)
+	__attribute__((format(__MINGW_PRINTF_FORMAT, 4, 5)))
+#else
 	__attribute__((format(printf, 4, 5)))
+#endif
 #endif
 	;
 

@@ -15,6 +15,12 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <errno.h>
+#ifdef _WIN32
+#include <direct.h>
+#define PHOTON_MKDIR(p) _mkdir(p)
+#else
+#define PHOTON_MKDIR(p) mkdir((p), 0755)
+#endif
 
 /* Well-known path types used by get_photon_filename() */
 typedef enum {
@@ -47,13 +53,13 @@ static inline int photon_mkdir_p(const char *path)
     if (tmp[len-1] == '/') tmp[len-1] = '\0';
 
     for (p = tmp + 1; *p; p++) {
-        if (*p == '/') {
+        if (*p == '/' || *p == '\\') {
             *p = '\0';
-            if (mkdir(tmp, 0755) != 0 && errno != EEXIST) return -1;
+            if (PHOTON_MKDIR(tmp) != 0 && errno != EEXIST) return -1;
             *p = '/';
         }
     }
-    return (mkdir(tmp, 0755) == 0 || errno == EEXIST) ? 0 : -1;
+    return (PHOTON_MKDIR(tmp) == 0 || errno == EEXIST) ? 0 : -1;
 }
 
 /* get_photon_filename() - resolve a path type to an absolute filesystem path.

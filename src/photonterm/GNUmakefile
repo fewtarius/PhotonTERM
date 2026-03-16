@@ -124,6 +124,10 @@ LDFLAGS :=
 ifeq ($(os),darwin)
   LDFLAGS += -framework Foundation
 endif
+ifdef win
+  # Fully static: no DLL deps (libgcc, libstdc++, libwinpthread all static)
+  LDFLAGS += -static -mwindows
+endif
 
 # ── Source objects ─────────────────────────────────────────────────────
 OBJ := $(OBJDIR)/photon_main.o \

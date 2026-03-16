@@ -52,7 +52,11 @@ target_compile_definitions(photonterm PRIVATE
 if(APPLE)
     target_compile_definitions(photonterm PRIVATE __DARWIN__ __unix__)
 elseif(WIN32)
-    target_compile_definitions(photonterm PRIVATE _WIN32 _USE_MATH_DEFINES)
+    target_compile_definitions(photonterm PRIVATE
+        _WIN32
+        _USE_MATH_DEFINES
+        __USE_MINGW_ANSI_STDIO=1
+    )
 else()
     target_compile_definitions(photonterm PRIVATE __unix__)
 endif()
@@ -91,25 +95,30 @@ target_link_libraries(photonterm PRIVATE
     libssh2::libssh2_static
     ZLIB::ZLIB
     Threads::Threads
-    m
 )
 
-# On Windows, SDL2main provides WinMain -> SDL_main trampoline
+# Platform-specific link setup
 if(WIN32)
-    target_link_libraries(photonterm PRIVATE SDL2::SDL2main)
-    target_link_options(photonterm PRIVATE -mwindows)
-endif()
+    # Fully static binary - no DLL dependencies at all.
+    # -static tells MinGW to link libgcc, libstdc++, and libwinpthread
+    # statically instead of requiring their DLLs at runtime.
+    target_link_options(photonterm PRIVATE -static -mwindows)
 
-if(APPLE)
+    # SDL2main provides WinMain -> SDL_main trampoline
+    target_link_libraries(photonterm PRIVATE SDL2::SDL2main)
+
+    # Windows system libraries needed by our deps:
+    #   ws2_32     - Winsock (networking)
+    #   crypt32    - OpenSSL certificate store (e_capi, winstore)
+    #   gdi32      - OpenSSL / SDL2
+    #   winmm      - SDL2 (multimedia timers)
+    #   imm32      - SDL2 (IME input)
+    #   setupapi   - SDL2 (device enumeration)
+    #   version    - SDL2 (version info API)
     target_link_libraries(photonterm PRIVATE
-        "-framework Foundation"
-        "-framework Security"
-        "-framework CoreFoundation"
+        ws2_32 crypt32 gdi32 winmm imm32 setupapi version
     )
-elseif(WIN32)
-    target_link_libraries(photonterm PRIVATE
-        ws2_32
-    )
+
     # GNU ld is order-sensitive. libcrypto.a needs crypt32/gdi32 but CMake
     # places our target_link_libraries before libcrypto (a transitive dep
     # of OpenSSL::SSL via OpenSSL::Crypto). Append to the imported target's
@@ -117,6 +126,17 @@ elseif(WIN32)
     set_property(TARGET OpenSSL::Crypto APPEND PROPERTY
         INTERFACE_LINK_LIBRARIES crypt32 gdi32
     )
+elseif(APPLE)
+    target_link_libraries(photonterm PRIVATE
+        "-framework Foundation"
+        "-framework Security"
+        "-framework CoreFoundation"
+    )
+endif()
+
+# libm - needed on POSIX; not needed on Windows (math in msvcrt)
+if(NOT WIN32)
+    target_link_libraries(photonterm PRIVATE m)
 endif()
 
 # ── macOS app bundle ───────────────────────────────────────────────────

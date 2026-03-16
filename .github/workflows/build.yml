@@ -261,6 +261,20 @@ jobs:
             -G "Ninja"
           cmake --build build --parallel $(nproc)
 
+      - name: Verify no DLL dependencies
+        run: |
+          echo "Checking for DLL dependencies..."
+          objdump -p build/src/photonterm/photonterm.exe | grep "DLL Name:" | sort
+          BAD_DLLS=$(objdump -p build/src/photonterm/photonterm.exe | grep "DLL Name:" | \
+            grep -iE "libgcc|libstdc|libwinpthread|libssp|SDL2\.dll|libcrypto|libssl|libssh2|zlib1" || true)
+          if [ -n "$BAD_DLLS" ]; then
+            echo "ERROR: Found non-system DLL dependencies:"
+            echo "$BAD_DLLS"
+            echo "Binary must be fully static. Add -static to linker flags."
+            exit 1
+          fi
+          echo "OK: No non-system DLL dependencies found"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:

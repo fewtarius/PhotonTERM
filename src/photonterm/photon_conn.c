@@ -29,10 +29,20 @@
 #define close(fd)     closesocket(fd)
 #define poll(fds,n,t) WSAPoll(fds,n,t)
 #define SHUT_RDWR     SD_BOTH
+/* MinGW provides POSIX errno values in <errno.h>; older MSVC does not.
+ * Only define the aliases when the POSIX names aren't already there. */
+#ifndef EINPROGRESS
 #define EINPROGRESS   WSAEINPROGRESS
+#endif
+#ifndef EWOULDBLOCK
 #define EWOULDBLOCK   WSAEWOULDBLOCK
+#endif
+#ifndef EHOSTUNREACH
 #define EHOSTUNREACH  WSAEHOSTUNREACH
+#endif
+#ifndef ENETUNREACH
 #define ENETUNREACH   WSAENETUNREACH
+#endif
 typedef int socklen_t;
 static inline void sock_set_nonblock(int fd, int nonblock) {
     u_long mode = nonblock;
@@ -343,7 +353,7 @@ static void telnet_request_opt(unsigned char what, unsigned char opt)
     unsigned char buf[3] = { TELNET_IAC, what, opt };
     if (s_active->telnet_sock != PHOTON_INVALID_SOCK) {
         pthread_mutex_lock(&s_active->telnet_send_mu);
-        send(s_active->telnet_sock, buf, 3, 0);
+        send(s_active->telnet_sock, (const char *)buf, 3, 0);
         pthread_mutex_unlock(&s_active->telnet_send_mu);
     }
 }
@@ -553,7 +563,7 @@ static void *telnet_rx_thread(void *arg)
         if (!sock_readable(C->telnet_sock, 100))
             continue;
 
-        ssize_t rd = recv(C->telnet_sock, raw, RING_SIZE, 0);
+        ssize_t rd = recv(C->telnet_sock, (char *)raw, RING_SIZE, 0);
         if (rd <= 0) {
             PHOTON_DBG("telnet_rx: recv=%zd errno=%d (%s)", rd, errno, strerror(errno));
             break;
@@ -607,7 +617,7 @@ static void *telnet_tx_thread(void *arg)
         while ((size_t)sent < exlen && !atomic_load(&C->terminate)) {
             if (!sock_writable(C->telnet_sock, 100)) continue;
             pthread_mutex_lock(&C->telnet_send_mu);
-            ssize_t r = send(C->telnet_sock, expanded + sent, exlen - (size_t)sent, 0);
+            ssize_t r = send(C->telnet_sock, (const char *)expanded + sent, exlen - (size_t)sent, 0);
             pthread_mutex_unlock(&C->telnet_send_mu);
             if (r <= 0) { PHOTON_DBG("telnet_tx: send error %zd errno=%d (%s)", r, errno, strerror(errno)); err = true; break; }
             sent += r;
@@ -1243,7 +1253,7 @@ void photon_conn_resize(int cols, int rows)
             TELNET_IAC, TELNET_SE
         };
         pthread_mutex_lock(&s_active->telnet_send_mu);
-        send(s_active->telnet_sock, naws, sizeof(naws), 0);
+        send(s_active->telnet_sock, (const char *)naws, sizeof(naws), 0);
         pthread_mutex_unlock(&s_active->telnet_send_mu);
     }
 
