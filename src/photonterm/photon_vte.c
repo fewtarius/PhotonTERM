@@ -887,8 +887,9 @@ static void feed_byte(vte_t *v, uint8_t b)
 {
     parser_state_t st = v->state;
 
-    /* Handle C1 controls (0x80-0x9F) as their 7-bit equivalents in GROUND */
-    if (st == ST_GROUND && b >= 0x80 && b <= 0x9F) {
+    /* Handle C1 controls (0x80-0x9F) as their 7-bit equivalents in GROUND.
+     * In CP437 mode these bytes are printable glyphs, not C1 controls. */
+    if (st == ST_GROUND && !v->cp437 && b >= 0x80 && b <= 0x9F) {
         /* Treat as ESC + (b - 0x40), e.g. 0x9B = CSI */
         uint8_t equiv = b - 0x40;
         feed_byte(v, 0x1B);  /* ESC */
@@ -907,7 +908,29 @@ static void feed_byte(vte_t *v, uint8_t b)
     /* ── GROUND ── */
     case ST_GROUND:
         if (b <= 0x1F) {
-            execute(v, b);
+            /* In CP437 mode, most C0 bytes are printable glyphs (smileys,
+             * card suits, arrows, etc.).  Only execute bytes that have
+             * real terminal control meaning. */
+            if (v->cp437) {
+                switch (b) {
+                case 0x07: /* BEL */
+                case 0x08: /* BS */
+                case 0x09: /* HT */
+                case 0x0A: /* LF */
+                case 0x0B: /* VT */
+                case 0x0C: /* FF */
+                case 0x0D: /* CR */
+                case 0x0E: /* SO */
+                case 0x0F: /* SI */
+                    execute(v, b);
+                    break;
+                default:
+                    print_char(v, cp437[b]);
+                    break;
+                }
+            } else {
+                execute(v, b);
+            }
         } else if (b >= 0x20 && b <= 0x7E) {
             /* Printable ASCII */
             uint32_t cp = v->cp437 ? cp437[b] : (uint32_t)b;
