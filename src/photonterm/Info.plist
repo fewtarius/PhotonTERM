@@ -21,7 +21,7 @@
 	<string>PhotonTERM</string>
 
 	<key>CFBundleShortVersionString</key>
-	<string>20260316.3</string>
+	<string>20260321.1</string>
 
 	<key>CFBundleGetInfoString</key>
 	<string>An ANSI-BBS terminal which supports telnet and SSH</string>
@@ -64,7 +64,7 @@
 	</array>
 
 	<key>CFBundleVersion</key>
-	<string>20260316.3</string>
+	<string>20260321.1</string>
 
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
