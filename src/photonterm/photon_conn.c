@@ -777,10 +777,11 @@ static bool ssh_authenticate(LIBSSH2_SESSION *sess, const char *user,
         };
         for (int i = 0; key_bases[i]; i++) {
             char priv[512], pub[512];
-            snprintf(priv, sizeof(priv), "%s/.ssh/%s",   home, key_bases[i]);
-            snprintf(pub,  sizeof(pub),  "%s/.ssh/%s_active->pub", home, key_bases[i]);
+            snprintf(priv, sizeof(priv), "%s/.ssh/%s",     home, key_bases[i]);
+            snprintf(pub,  sizeof(pub),  "%s/.ssh/%s.pub", home, key_bases[i]);
             if (access(priv, R_OK) == 0) {
                 PHOTON_DBG("ssh_auth: trying keyfile %s", priv);
+                /* Try with stored password first (may be the passphrase) */
                 int rc = libssh2_userauth_publickey_fromfile(sess, user,
                                                               pub, priv,
                                                               pass ? pass : "");
@@ -789,6 +790,23 @@ static bool ssh_authenticate(LIBSSH2_SESSION *sess, const char *user,
                     libssh2_session_set_blocking(sess, 0);
                     PHOTON_DBG("ssh_auth: keyfile SUCCESS");
                     return true;
+                }
+                /* Key exists but auth failed - prompt for passphrase */
+                if (s_ssh_prompt_fn) {
+                    char phrase[256] = {0};
+                    if (s_ssh_prompt_fn("SSH Key Passphrase", phrase,
+                                         sizeof(phrase), s_ssh_prompt_ud)
+                        && phrase[0]) {
+                        rc = libssh2_userauth_publickey_fromfile(sess, user,
+                                                                  pub, priv,
+                                                                  phrase);
+                        memset(phrase, 0, sizeof(phrase));
+                        PHOTON_DBG("ssh_auth: keyfile+passphrase rc=%d", rc);
+                        if (rc == 0) {
+                            libssh2_session_set_blocking(sess, 0);
+                            return true;
+                        }
+                    }
                 }
             }
         }

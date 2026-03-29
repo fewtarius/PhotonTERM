@@ -296,42 +296,54 @@ static session_menu_result_t show_session_menu(photon_ui_t *ui,
  * key returns to live terminal. */
 static void run_scrollback_viewer(vte_t *vte, photon_sdl_t *sdl)
 {
-    int sb_total = vte_scrollback_lines(vte);
-    if (sb_total <= 0) return;
+    int sb_lines = vte_scrollback_lines(vte);
+    int screen_rows = vte_rows(vte);
+    int total = sb_lines + screen_rows;  /* scrollback + live screen */
+    if (total <= 0) return;
 
     int cols = photon_sdl_cols(sdl);
     int rows = photon_sdl_rows(sdl);
+    int visible = rows - 1;  /* reserve bottom row for status bar */
+    if (visible < 1) visible = 1;
 
-    /* Allocate one row's worth of cells */
     vte_cell_t *row_buf = calloc((size_t)cols, sizeof(vte_cell_t));
     if (!row_buf) return;
 
-    /* scroll_top is the scrollback line index shown at the top of screen.
-     * scrollback line 0 = oldest; sb_total-1 = most recent.
-     * We show the most recent lines first (like a terminal): top of screen
-     * shows the oldest visible line, bottom shows the newest. */
-    int scroll_top = sb_total - rows;  /* show latest page */
+    /* Start at bottom (live screen visible) */
+    int scroll_top = total - visible;
     if (scroll_top < 0) scroll_top = 0;
 
     bool redraw = true;
     bool done   = false;
 
-    /* Status bar colours */
+    /* Status bar colours (bright white on blue, bold) */
     vte_cell_t sb_bar_bg = { ' ', 15, 4, VTE_ATTR_BOLD };
+    vte_cell_t blank = { ' ', VTE_COLOR_DEFAULT_FG, VTE_COLOR_DEFAULT_BG, 0 };
 
     while (!done) {
         if (redraw) {
-            /* Paint scrollback lines over the screen */
-            for (int r = 0; r < rows; r++) {
-                int sb_line = scroll_top + r;
-                if (sb_line < sb_total) {
-                    vte_scrollback_get(vte, sb_line, row_buf, NULL);
+            for (int r = 0; r < visible; r++) {
+                int line = scroll_top + r;  /* virtual line in combined buffer */
+                bool got = false;
+                if (line < sb_lines) {
+                    /* In scrollback region */
+                    got = vte_scrollback_get(vte, line, row_buf, NULL);
+                } else if (line < total) {
+                    /* In live screen region */
+                    int screen_row = line - sb_lines;  /* 0-based */
+                    for (int c = 0; c < cols; c++) {
+                        vte_cell_t cell;
+                        if (vte_get_cell(vte, c + 1, screen_row + 1, &cell))
+                            row_buf[c] = cell;
+                        else
+                            row_buf[c] = blank;
+                    }
+                    got = true;
+                }
+                if (got) {
                     for (int c = 0; c < cols; c++)
                         photon_sdl_draw_cell(sdl, c + 1, r + 1, &row_buf[c]);
                 } else {
-                    /* Lines below scrollback: blank */
-                    vte_cell_t blank = { ' ', VTE_COLOR_DEFAULT_FG,
-                                        VTE_COLOR_DEFAULT_BG, 0 };
                     for (int c = 0; c < cols; c++)
                         photon_sdl_draw_cell(sdl, c + 1, r + 1, &blank);
                 }
@@ -339,8 +351,8 @@ static void run_scrollback_viewer(vte_t *vte, photon_sdl_t *sdl)
             /* Status bar on bottom row */
             char status[128];
             snprintf(status, sizeof(status),
-                     " SCROLLBACK  Line %d/%d  \xe2\x86\x91\xe2\x86\x93=scroll  PgUp/PgDn  Home/End  ESC=exit ",
-                     scroll_top + 1, sb_total);
+                     " SCROLLBACK  Line %d/%d  Up/Dn  PgUp/PgDn  Home/End  ESC=exit",
+                     scroll_top + 1, total);
             int slen = (int)strlen(status);
             for (int c = 0; c < cols; c++) {
                 vte_cell_t cell = sb_bar_bg;
@@ -370,16 +382,16 @@ static void run_scrollback_viewer(vte_t *vte, photon_sdl_t *sdl)
             scroll_top++;
             break;
         case SDLK_PAGEUP:
-            scroll_top -= rows - 1;
+            scroll_top -= visible;
             break;
         case SDLK_PAGEDOWN:
-            scroll_top += rows - 1;
+            scroll_top += visible;
             break;
         case SDLK_HOME:
             scroll_top = 0;
             break;
         case SDLK_END:
-            scroll_top = sb_total - rows;
+            scroll_top = total - visible;
             break;
         default:
             done = true;  /* any other key exits */
@@ -387,9 +399,10 @@ static void run_scrollback_viewer(vte_t *vte, photon_sdl_t *sdl)
         }
 
         /* Clamp */
+        int max_top = total - visible;
+        if (max_top < 0) max_top = 0;
         if (scroll_top < 0) scroll_top = 0;
-        if (scroll_top > sb_total - rows) scroll_top = sb_total - rows;
-        if (scroll_top < 0) scroll_top = 0;
+        if (scroll_top > max_top) scroll_top = max_top;
 
         if (scroll_top != prev_top) redraw = true;
     }
@@ -468,8 +481,9 @@ photon_term_result_t photon_doterm(vte_t *vte, photon_sdl_t *sdl,
                     break;
                 }
 
-                /* PageUp (with no modifier): open scrollback viewer */
-                if (k.code == PHOTON_KEY_PGUP && !k.mod) {
+                /* PageUp (optionally with Shift) or Cmd+Up: open scrollback viewer */
+                if ((k.code == PHOTON_KEY_PGUP && !(k.mod & ~PHOTON_MOD_SHIFT))
+                    || (k.code == PHOTON_KEY_UP && (k.mod & PHOTON_MOD_META))) {
                     run_scrollback_viewer(vte, sdl);
                     dirty = true;
                     continue;

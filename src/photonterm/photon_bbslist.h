@@ -11,13 +11,18 @@
 #include "photon_settings.h"
 
 /* Show the dialing directory and return a heap-allocated photon_bbs_t entry
- * for the user's selection, or NULL if the user cancelled.
+ * for the user's selection, or NULL if the user cancelled/quit.
  * The caller must free the result with photon_bbslist_free().
  *
  * If start_in_directory is true, skip the splash screen and open the
  * directory immediately (used when returning from a disconnected session).
- * If false, show the splash first (normal cold-start behaviour). */
-photon_bbs_t *photon_bbslist_run(photon_ui_t *ui, bool start_in_directory);
+ * If false, show the splash first (normal cold-start behaviour).
+ *
+ * reselect: if non-NULL, pre-select the matching entry in the directory
+ * (matches on name, addr, port, conn_type). Used to highlight the
+ * last-connected BBS after disconnect. */
+photon_bbs_t *photon_bbslist_run(photon_ui_t *ui, bool start_in_directory,
+                                  const photon_bbs_t *reselect);
 void          photon_bbslist_free(photon_bbs_t *bbs);
 
 /* Run the settings menu overlay. Can be called from any context

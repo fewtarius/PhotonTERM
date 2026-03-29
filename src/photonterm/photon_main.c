@@ -320,11 +320,16 @@ int main(int argc, char **argv)
 
     bool running = true;
     bool show_directory = false;  /* true = skip splash, open directory directly */
+    photon_bbs_t reselect_bbs;
+    bool has_reselect = false;
+    memset(&reselect_bbs, 0, sizeof(reselect_bbs));
     while (running) {
 
         /* Show BBS list to pick a connection */
-        photon_bbs_t *bbs = photon_bbslist_run(ui, show_directory);
+        photon_bbs_t *bbs = photon_bbslist_run(ui, show_directory,
+                                                has_reselect ? &reselect_bbs : NULL);
         show_directory = false;  /* reset: only skip splash for the next call */
+        has_reselect = false;
         if (!bbs) {
             PHOTON_DBG("user cancelled BBS list");
             if (ntabs == 0) break;  /* no tabs open -> exit */
@@ -444,6 +449,11 @@ int main(int argc, char **argv)
             break;
 
         case PHOTON_TERM_DISCONNECT:
+            /* Save BBS info for re-selection before closing tab */
+            if (tabs[active_tab].bbs) {
+                reselect_bbs = *tabs[active_tab].bbs;
+                has_reselect = true;
+            }
             /* Session ended - close this tab */
             close_tab(sdl, active_tab);
             photon_theme_apply(photon_active_theme, sdl, &settings);

@@ -886,7 +886,8 @@ static bool photon_bbs_edit(photon_ui_t *ui, photon_bbs_t *bbs, bool is_new)
 }
 
 /* ── Directory browser (main loop) ──────────────────────────────────── */
-static photon_bbs_t *run_directory(photon_ui_t *ui, photon_settings_t *s)
+static photon_bbs_t *run_directory(photon_ui_t *ui, photon_settings_t *s,
+                                    const photon_bbs_t *reselect, bool *quit_out)
 {
     photon_bbs_t *list = calloc(MAX_BBS_ENTRIES, sizeof(*list));
     if (!list) return NULL;
@@ -908,8 +909,32 @@ static photon_bbs_t *run_directory(photon_ui_t *ui, photon_settings_t *s)
     photon_bbs_t *result = NULL;
     bool done  = false;
 
-    /* Settings */
-    /* (settings state managed by run_settings()) */
+    /* Pre-select the entry matching reselect (e.g. after disconnect) */
+    if (reselect && reselect->name[0]) {
+        PHOTON_DBG("reselect: looking for name='%s' addr='%s' port=%d type=%d",
+                   reselect->name, reselect->addr, reselect->port, reselect->conn_type);
+        bool found = false;
+        for (int i = 0; i < count; i++) {
+            if (strcmp(list[i].name, reselect->name) == 0
+                && strcmp(list[i].addr, reselect->addr) == 0
+                && list[i].port == reselect->port
+                && list[i].conn_type == reselect->conn_type) {
+                cur = i;
+                found = true;
+                PHOTON_DBG("reselect: matched entry %d '%s'", i, list[i].name);
+                break;
+            }
+        }
+        if (!found) {
+            PHOTON_DBG("reselect: NO MATCH found in %d entries", count);
+            for (int i = 0; i < count; i++) {
+                PHOTON_DBG("  entry[%d]: name='%s' addr='%s' port=%d type=%d",
+                           i, list[i].name, list[i].addr, list[i].port, list[i].conn_type);
+            }
+        }
+    } else {
+        PHOTON_DBG("reselect: NULL or empty");
+    }
 
     while (!done) {
         int visible = (y2 - 2) - (y1 + 1);   /* list_y2 - list_y1 + 1 */
@@ -945,6 +970,7 @@ static photon_bbs_t *run_directory(photon_ui_t *ui, photon_settings_t *s)
 
         switch (key.code) {
         case PHOTON_KEY_QUIT:
+            if (quit_out) *quit_out = true;
             done = true;
             break;
 
@@ -1060,7 +1086,11 @@ static photon_bbs_t *run_directory(photon_ui_t *ui, photon_settings_t *s)
             break;
 
         case 'Q': case 'q':
-            done = true;
+            if (photon_ui_confirm(ui, "Quit PhotonTERM?")) {
+                if (quit_out) *quit_out = true;
+                done = true;
+            }
+            redraw = true;
             break;
 
         default:
@@ -1087,7 +1117,8 @@ static photon_bbs_t *run_directory(photon_ui_t *ui, photon_settings_t *s)
 
 /* ── Public entry point ──────────────────────────────────────────────── */
 
-photon_bbs_t *photon_bbslist_run(photon_ui_t *ui, bool start_in_directory)
+photon_bbs_t *photon_bbslist_run(photon_ui_t *ui, bool start_in_directory,
+                                  const photon_bbs_t *reselect)
 {
     /* Load settings and apply active theme */
     photon_settings_t s;
@@ -1100,13 +1131,17 @@ photon_bbs_t *photon_bbslist_run(photon_ui_t *ui, bool start_in_directory)
 
     photon_bbs_t *result = NULL;
     bool done = false;
+    bool quit = false;
 
     /* Splash loop */
     while (!done) {
         if (start_in_directory) {
             /* Go straight to directory; if user ESCs, fall back to splash */
-            result = run_directory(ui, &s);
+            result = run_directory(ui, &s, reselect, &quit);
+            reselect = NULL;  /* only applies to first directory open */
             if (result) {
+                done = true;
+            } else if (quit) {
                 done = true;
             } else {
                 /* User cancelled the directory - show splash from here on */
@@ -1145,8 +1180,8 @@ photon_bbs_t *photon_bbslist_run(photon_ui_t *ui, bool start_in_directory)
 
             default:
                 /* Any other key - open directory */
-                result = run_directory(ui, &s);
-                if (result)
+                result = run_directory(ui, &s, NULL, &quit);
+                if (result || quit)
                     done = true;
                 /* else: user ESC'd from directory - loop back to splash */
                 break;
