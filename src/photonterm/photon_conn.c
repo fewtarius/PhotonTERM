@@ -1038,8 +1038,12 @@ static bool conn_shell_connect(const photon_bbs_t *bbs)
         setenv("TERM", "xterm-256color", 1);
         setenv("COLORTERM", "truecolor", 1);
         setenv("TERM_PROGRAM", "PhotonTERM", 1);
-        if (!getenv("LANG"))
-            setenv("LANG", "en_US.UTF-8", 1);
+        if (bbs && bbs->term_mode == PHOTON_TERM_MODE_CP437) {
+            setenv("LANG", "en_US", 1);
+        } else {
+            if (!getenv("LANG"))
+                setenv("LANG", "en_US.UTF-8", 1);
+        }
         if (!getenv("HOME")) {
             struct passwd *pw = getpwuid(getuid());
             if (pw && pw->pw_dir) setenv("HOME", pw->pw_dir, 1);
