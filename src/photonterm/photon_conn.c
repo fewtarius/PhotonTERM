@@ -5,12 +5,20 @@
  *
  * Implements photon_conn_connect / _close / _recv / _send.
  * Supports PHOTON_CONN_TELNET (RFC 854), PHOTON_CONN_SSH (libssh2),
- * and PHOTON_CONN_SHELL (local PTY, POSIX only).
+ * and PHOTON_CONN_SHELL (local PTY on POSIX, ConPTY on Windows 10+).
  *
  * All I/O runs in background threads; the public API is thread-safe.
  * The ring-buffer design is based on the original conn.c ring-buffer
  * Clean connection transport layer for PhotonTERM.
  */
+
+/* ConPTY requires Windows 10+ headers */
+#ifdef _WIN32
+# if !defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0A00
+#  undef _WIN32_WINNT
+#  define _WIN32_WINNT 0x0A00
+# endif
+#endif
 
 #include "photon_conn.h"
 #include "photon_bbs.h"
@@ -325,6 +333,14 @@ struct photon_conn {
 
     /* PTY */
     int             pty_fd;
+
+#ifdef _WIN32
+    /* ConPTY (Windows 10 1809+) */
+    HPCON           conpty;
+    HANDLE          conpty_in;    /* write end: parent -> child stdin */
+    HANDLE          conpty_out;   /* read end: child stdout -> parent */
+    PROCESS_INFORMATION conpty_pi;
+#endif
 
     int             type;  /* PHOTON_CONN_* */
 };
@@ -1088,6 +1104,155 @@ static bool conn_shell_connect(const photon_bbs_t *bbs)
 }
 #endif /* __unix__ */
 
+/* ── ConPTY / shell connect (Windows 10 1809+) ─────────────────────── */
+
+#ifdef _WIN32
+
+/* ConPTY I/O threads: same pattern as POSIX pty_rx/tx but with ReadFile/WriteFile */
+static void *conpty_rx_thread(void *arg)
+{
+    photon_conn_t *C = arg;
+    unsigned char buf[65536];
+    atomic_store(&C->rx.running, 1);
+    while (!atomic_load(&C->terminate)) {
+        DWORD rd = 0;
+        BOOL ok = ReadFile(C->conpty_out, buf, sizeof(buf), &rd, NULL);
+        if (!ok || rd == 0) break;
+        size_t sent = 0;
+        while (sent < (size_t)rd && !atomic_load(&C->terminate)) {
+            pthread_mutex_lock(&C->inbuf->mu);
+            sent += ring_put(C->inbuf, buf + sent, (size_t)rd - sent);
+            pthread_mutex_unlock(&C->inbuf->mu);
+        }
+    }
+    atomic_store(&C->rx.running, 2);
+    return NULL;
+}
+
+static void *conpty_tx_thread(void *arg)
+{
+    photon_conn_t *C = arg;
+    unsigned char buf[4096];
+    atomic_store(&C->tx.running, 1);
+    while (!atomic_load(&C->terminate)) {
+        size_t n = ring_wait_bytes(C->outbuf, 1, 100);
+        if (n == 0) {
+            if (atomic_load(&C->rx.running) == 2) break;
+            continue;
+        }
+        pthread_mutex_lock(&C->outbuf->mu);
+        n = ring_get(C->outbuf, buf, sizeof(buf));
+        pthread_mutex_unlock(&C->outbuf->mu);
+        if (n == 0) continue;
+        DWORD written = 0;
+        WriteFile(C->conpty_in, buf, (DWORD)n, &written, NULL);
+    }
+    atomic_store(&C->tx.running, 2);
+    return NULL;
+}
+
+static bool conn_shell_connect(const photon_bbs_t *bbs)
+{
+    /* Create pipes for ConPTY */
+    HANDLE pipe_in_read = INVALID_HANDLE_VALUE;
+    HANDLE pipe_in_write = INVALID_HANDLE_VALUE;
+    HANDLE pipe_out_read = INVALID_HANDLE_VALUE;
+    HANDLE pipe_out_write = INVALID_HANDLE_VALUE;
+
+    if (!CreatePipe(&pipe_in_read, &pipe_in_write, NULL, 0) ||
+        !CreatePipe(&pipe_out_read, &pipe_out_write, NULL, 0)) {
+        set_error("CreatePipe failed: %lu", GetLastError());
+        return false;
+    }
+
+    /* Create pseudo console */
+    COORD size = { 80, 24 };
+    HPCON hpc = 0;
+    HRESULT hr = CreatePseudoConsole(size, pipe_in_read, pipe_out_write, 0, &hpc);
+    if (FAILED(hr)) {
+        set_error("CreatePseudoConsole failed: 0x%lx", (unsigned long)hr);
+        CloseHandle(pipe_in_read);
+        CloseHandle(pipe_in_write);
+        CloseHandle(pipe_out_read);
+        CloseHandle(pipe_out_write);
+        return false;
+    }
+
+    /* Prepare startup info with pseudo console handle */
+    STARTUPINFOEXW si;
+    memset(&si, 0, sizeof(si));
+    si.StartupInfo.cb = sizeof(si);
+
+    SIZE_T attr_size = 0;
+    InitializeProcThreadAttributeList(NULL, 1, 0, &attr_size);
+    si.lpAttributeList = (LPPROC_THREAD_ATTRIBUTE_LIST)malloc(attr_size);
+    if (!si.lpAttributeList) {
+        ClosePseudoConsole(hpc);
+        CloseHandle(pipe_in_read);
+        CloseHandle(pipe_in_write);
+        CloseHandle(pipe_out_read);
+        CloseHandle(pipe_out_write);
+        set_error("out of memory");
+        return false;
+    }
+    InitializeProcThreadAttributeList(si.lpAttributeList, 1, 0, &attr_size);
+    UpdateProcThreadAttribute(si.lpAttributeList, 0,
+                              PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
+                              hpc, sizeof(hpc), NULL, NULL);
+
+    /* Build command line */
+    wchar_t cmdline[4096];
+    if (bbs && bbs->addr[0]) {
+        /* Custom command: run via cmd.exe /C */
+        wchar_t addr_w[2048];
+        MultiByteToWideChar(CP_UTF8, 0, bbs->addr, -1, addr_w, 2048);
+        _snwprintf(cmdline, 4096, L"cmd.exe /C %ls", addr_w);
+    } else {
+        wcscpy(cmdline, L"cmd.exe");
+    }
+
+    /* Set environment: TERM, COLORTERM */
+    SetEnvironmentVariableA("TERM", "xterm-256color");
+    SetEnvironmentVariableA("COLORTERM", "truecolor");
+    SetEnvironmentVariableA("TERM_PROGRAM", "PhotonTERM");
+
+    PROCESS_INFORMATION pi;
+    memset(&pi, 0, sizeof(pi));
+    BOOL created = CreateProcessW(
+        NULL, cmdline, NULL, NULL, FALSE,
+        EXTENDED_STARTUPINFO_PRESENT, NULL, NULL,
+        &si.StartupInfo, &pi);
+
+    DeleteProcThreadAttributeList(si.lpAttributeList);
+    free(si.lpAttributeList);
+
+    /* Close pipe ends now owned by the child */
+    CloseHandle(pipe_in_read);
+    CloseHandle(pipe_out_write);
+
+    if (!created) {
+        set_error("CreateProcess failed: %lu", GetLastError());
+        ClosePseudoConsole(hpc);
+        CloseHandle(pipe_in_write);
+        CloseHandle(pipe_out_read);
+        return false;
+    }
+
+    s_active->conpty = hpc;
+    s_active->conpty_in = pipe_in_write;
+    s_active->conpty_out = pipe_out_read;
+    s_active->conpty_pi = pi;
+
+    create_io_thread(&s_active->rx.thread, conpty_rx_thread, s_active);
+    create_io_thread(&s_active->tx.thread, conpty_tx_thread, s_active);
+    while (!atomic_load(&s_active->rx.running) || !atomic_load(&s_active->tx.running)) {
+        struct timespec ts = {0, 1000000L};
+        nanosleep(&ts, NULL);
+    }
+    return true;
+}
+#endif /* _WIN32 */
+
 /* ── Public API ─────────────────────────────────────────────────────── */
 
 bool photon_conn_connect(const photon_bbs_t *bbs)
@@ -1135,7 +1300,7 @@ bool photon_conn_connect(const photon_bbs_t *bbs)
     switch (bbs->conn_type) {
         case PHOTON_CONN_TELNET: ok = conn_telnet_connect(bbs); break;
         case PHOTON_CONN_SSH:    ok = conn_ssh_connect(bbs);    break;
-#ifdef __unix__
+#if defined(__unix__) || defined(_WIN32)
         case PHOTON_CONN_SHELL:  ok = conn_shell_connect(bbs);  break;
 #endif
         default:
@@ -1195,6 +1360,26 @@ void photon_conn_close(void)
     if (s_active->pty_fd >= 0) {
         close(s_active->pty_fd);
         s_active->pty_fd = -1;
+    }
+#endif
+#ifdef _WIN32
+    if (s_active->conpty) {
+        ClosePseudoConsole(s_active->conpty);
+        s_active->conpty = 0;
+    }
+    if (s_active->conpty_in != INVALID_HANDLE_VALUE && s_active->conpty_in) {
+        CloseHandle(s_active->conpty_in);
+        s_active->conpty_in = INVALID_HANDLE_VALUE;
+    }
+    if (s_active->conpty_out != INVALID_HANDLE_VALUE && s_active->conpty_out) {
+        CloseHandle(s_active->conpty_out);
+        s_active->conpty_out = INVALID_HANDLE_VALUE;
+    }
+    if (s_active->conpty_pi.hProcess) {
+        TerminateProcess(s_active->conpty_pi.hProcess, 0);
+        CloseHandle(s_active->conpty_pi.hProcess);
+        CloseHandle(s_active->conpty_pi.hThread);
+        memset(&s_active->conpty_pi, 0, sizeof(s_active->conpty_pi));
     }
 #endif
 
@@ -1290,6 +1475,13 @@ void photon_conn_resize(int cols, int rows)
         ws.ws_col = (unsigned short)cols;
         ws.ws_row = (unsigned short)rows;
         ioctl(s_active->pty_fd, TIOCSWINSZ, &ws);
+    }
+#else
+    if (s_active->type == PHOTON_CONN_SHELL && s_active->conpty) {
+        COORD size;
+        size.X = (SHORT)cols;
+        size.Y = (SHORT)rows;
+        ResizePseudoConsole(s_active->conpty, size);
     }
 #endif
 }
