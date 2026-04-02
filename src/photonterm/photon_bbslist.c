@@ -17,6 +17,7 @@
 
 #include "photon_compat.h"
 #include "photon_ui.h"
+#include "photon_menu.h"
 
 /* exported from photon_main.c - updated when settings change */
 extern bool g_bell_enabled;
@@ -140,14 +141,6 @@ static void fill_rect(photon_ui_t *ui,
 }
 
 /* Write a string padded/clipped to exactly `width` columns */
-static void put_padded(photon_ui_t *ui, int col, int row,
-                       const char *s, int width, uint8_t attr)
-{
-    char tmp[256];
-    snprintf(tmp, sizeof(tmp), "%-*.*s", width, width, s ? s : "");
-    put_str(ui, col, row, tmp, attr);
-}
-
 /* ── Connection type short label ─────────────────────────────────────── */
 
 static const char *conn_type_label(photon_conn_type_t t)
@@ -298,37 +291,6 @@ static void draw_splash(photon_ui_t *ui)
 
 /* ── Directory browser drawing ──────────────────────────────────────── */
 
-/* Draw top edge of box with centred title: ╔════ Title ════╗ */
-static void draw_box_top_titled(photon_ui_t *ui,
-                                int x1, int x2, int y,
-                                uint8_t box_a, uint8_t title_a,
-                                const char *title)
-{
-    int inner_w = x2 - x1 - 1;
-    int tlen    = (int)strlen(title);
-    int pad     = (inner_w - tlen - 2) / 2;
-    int rem     = inner_w - tlen - 2 - 2 * pad;
-
-    put_cell(ui, x1, y, BOX_TL, box_a);
-    for (int i = 0; i < pad; i++) put_cell(ui, x1 + 1 + i, y, BOX_H, box_a);
-    int cx = x1 + 1 + pad;
-    put_cell(ui, cx++, y, ' ', title_a);
-    cx += put_str(ui, cx, y, title, title_a);
-    put_cell(ui, cx++, y, ' ', title_a);
-    for (int i = 0; i < pad + rem; i++) put_cell(ui, cx + i, y, BOX_H, box_a);
-    put_cell(ui, x2, y, BOX_TR, box_a);
-}
-
-/* Draw a horizontal separator ╠═══╣ */
-static void draw_box_sep(photon_ui_t *ui, int x1, int x2, int y, uint8_t box_a)
-{
-    int inner_w = x2 - x1 - 1;
-    put_cell(ui, x1, y, BOX_ML, box_a);
-    for (int i = 0; i < inner_w; i++) put_cell(ui, x1 + 1 + i, y, BOX_H, box_a);
-    put_cell(ui, x2, y, BOX_MR, box_a);
-}
-
-/* Draw a single directory entry row */
 /* ── Directory sort comparators ─────────────────────────────────────── */
 
 static int cmp_bbs_name(const void *a, const void *b)
@@ -371,158 +333,74 @@ static const char *sort_mode_name(int mode)
     }
 }
 
-static void draw_dir_entry(photon_ui_t *ui,
-                           int xi, int y, int eff_w,
-                           const photon_bbs_t *bbs, bool selected,
-                           bool has_scroll)
-{
-    const photon_theme_t *t = active_theme();
-    (void)has_scroll;
+/* ── Directory list item renderer (for photon_menu_list_t) ──────────── */
 
-    /* Calculate column widths */
+static void dir_draw_item(photon_ui_t *ui,
+                          void *items, int index,
+                          int row, int col_start, int col_end,
+                          bool selected,
+                          const photon_theme_t *t)
+{
+    const photon_bbs_t *list = (const photon_bbs_t *)items;
+    const photon_bbs_t *bbs = &list[index];
+
+    int eff_w = col_end - col_start + 1;
     int addr_w = 28;
     int name_w = eff_w - DIR_COL_CUR - DIR_COL_SEP - DIR_COL_TYPE - 1 - addr_w;
     if (name_w < 4) name_w = 4;
 
     uint8_t a_norm, a_hi, a_dim;
     if (selected) {
-        a_norm = A_SEL(t);
-        a_hi   = A_SEL_HI(t);
-        a_dim  = A_SEL(t);
+        a_norm = PHOTON_MENU_A_SEL(t);
+        a_hi   = PHOTON_MENU_A_SEL_HI(t);
+        a_dim  = PHOTON_MENU_A_SEL(t);
     } else {
-        a_norm = A_NORM(t);
-        a_hi   = ATTR((t)->hclr, (t)->bclr);
-        a_dim  = A_DIM(t);
+        a_norm = PHOTON_MENU_A_NORM(t);
+        a_hi   = PHOTON_MENU_ATTR(t->hclr, t->bclr);
+        a_dim  = PHOTON_MENU_A_DIM(t);
     }
+
+    int xi = col_start;
 
     /* Clear row */
-    fill_rect(ui, xi, y, xi + eff_w - 1, y, a_norm);
+    photon_menu_fill_rect(ui, xi, row, xi + eff_w - 1, row, a_norm);
 
     /* Cursor indicator */
-    put_cell(ui, xi,     y, selected ? ARROW_RIGHT : ' ', a_hi);
-    put_cell(ui, xi + 1, y, ' ', a_norm);
+    photon_menu_put_cell(ui, xi,     row, selected ? ARROW_RIGHT : ' ', a_hi);
+    photon_menu_put_cell(ui, xi + 1, row, ' ', a_norm);
 
     /* Name */
-    put_padded(ui, xi + DIR_COL_CUR, y, bbs->name, name_w, a_norm);
+    photon_menu_put_padded(ui, xi + DIR_COL_CUR, row, bbs->name, name_w, a_norm);
 
     /* Space + Type */
-    put_cell(ui, xi + DIR_COL_CUR + name_w, y, ' ', a_dim);
-    put_padded(ui, xi + DIR_COL_CUR + name_w + DIR_COL_SEP, y,
-               conn_type_label(bbs->conn_type), DIR_COL_TYPE, a_dim);
+    photon_menu_put_cell(ui, xi + DIR_COL_CUR + name_w, row, ' ', a_dim);
+    photon_menu_put_padded(ui, xi + DIR_COL_CUR + name_w + DIR_COL_SEP, row,
+                           conn_type_label(bbs->conn_type), DIR_COL_TYPE, a_dim);
 
-    /* Space + Address / Command */
-    put_cell(ui, xi + DIR_COL_CUR + name_w + DIR_COL_SEP + DIR_COL_TYPE, y, ' ', a_dim);
+    /* Space + Address */
+    photon_menu_put_cell(ui, xi + DIR_COL_CUR + name_w + DIR_COL_SEP + DIR_COL_TYPE, row, ' ', a_dim);
     const char *addr_display = bbs->addr[0] ? bbs->addr
                                : (bbs->conn_type == PHOTON_CONN_SHELL ? "$SHELL" : "");
-    put_padded(ui, xi + DIR_COL_CUR + name_w + DIR_COL_SEP + DIR_COL_TYPE + 1, y,
-               addr_display, addr_w, a_dim);
+    photon_menu_put_padded(ui, xi + DIR_COL_CUR + name_w + DIR_COL_SEP + DIR_COL_TYPE + 1, row,
+                           addr_display, addr_w, a_dim);
 }
 
-/* Full directory redraw */
-static void redraw_dir(photon_ui_t *ui,
-                       int x1, int y1, int x2, int y2,
-                       const photon_bbs_t *list, int count,
-                       int cur, int top, bool connected, int sort_mode)
+/* Directory column headers */
+static void dir_draw_header(photon_ui_t *ui, int row, int width,
+                            const photon_theme_t *t)
 {
-    const photon_theme_t *t = active_theme();
+    uint8_t hdr_a = PHOTON_MENU_A_HDR(t);
+    photon_menu_fill_rect(ui, 1, row, width, row, hdr_a);
 
-    int ix1      = x1 + 1;
-    int ix2      = x2 - 1;
-    int inner_w  = ix2 - ix1 + 1;
-    int hdr_row  = y1 + 1;
-    int sep_row  = y2 - 2;
-    int hint_row = y2 - 1;
-    int list_y1  = hdr_row + 1;
-    int list_y2  = sep_row - 1;
-    int visible  = list_y2 - list_y1 + 1;
-    if (visible < 1) visible = 1;
+    int addr_w = 28;
+    int name_w = width - DIR_COL_CUR - DIR_COL_SEP - DIR_COL_TYPE - 1 - addr_w;
+    if (name_w < 4) name_w = 4;
 
-    bool has_scroll = count > visible;
-    int  eff_w      = has_scroll ? inner_w - 1 : inner_w;
-
-    uint8_t box_a   = A_BOX(t);
-    uint8_t title_a = A_TITLE(t);
-    uint8_t hdr_a   = A_HDR(t);
-    uint8_t norm_a  = A_NORM(t);
-    uint8_t hint_a  = A_HINT(t);
-    uint8_t hintk_a = A_HINT_K(t);
-
-    /* Top edge with title */
-    char dir_title[64];
-    snprintf(dir_title, sizeof(dir_title), "PhotonTERM Directory%s", sort_mode_name(sort_mode));
-    draw_box_top_titled(ui, x1, x2, y1, box_a, title_a, dir_title);
-
-    /* Side edges */
-    for (int r = y1 + 1; r < y2; r++) {
-        put_cell(ui, x1, r, BOX_V, box_a);
-        put_cell(ui, x2, r, BOX_V, box_a);
-    }
-
-    /* Bottom edge */
-    put_cell(ui, x1, y2, BOX_BL, box_a);
-    for (int i = 0; i < inner_w; i++) put_cell(ui, x1 + 1 + i, y2, BOX_H, box_a);
-    put_cell(ui, x2, y2, BOX_BR, box_a);
-
-    /* Column header row */
-    {
-        int addr_w = 28;
-        int name_w = eff_w - DIR_COL_CUR - DIR_COL_SEP - DIR_COL_TYPE - 1 - addr_w;
-        if (name_w < 4) name_w = 4;
-        fill_rect(ui, ix1, hdr_row, ix2, hdr_row, hdr_a);
-        put_padded(ui, ix1 + DIR_COL_CUR,                      hdr_row, "Name",    name_w,      hdr_a);
-        put_cell  (ui, ix1 + DIR_COL_CUR + name_w,             hdr_row, ' ',       hdr_a);
-        put_padded(ui, ix1 + DIR_COL_CUR + name_w + DIR_COL_SEP, hdr_row, "Type", DIR_COL_TYPE, hdr_a);
-        put_cell  (ui, ix1 + DIR_COL_CUR + name_w + DIR_COL_SEP + DIR_COL_TYPE, hdr_row, ' ', hdr_a);
-        put_padded(ui, ix1 + DIR_COL_CUR + name_w + DIR_COL_SEP + DIR_COL_TYPE + 1, hdr_row, "Address", addr_w, hdr_a);
-    }
-
-    /* Separator after header */
-    draw_box_sep(ui, x1, x2, sep_row, box_a);
-
-    /* Hint bar */
-    {
-        const char *hints = connected
-            ? "ENTER Edit  E Edit  +/N New  -/D Delete  S Sort  Tab Settings  ESC Close"
-            : "ENTER Connect  E Edit  +/N New  -/D Delete  S Sort  Tab Settings  ESC Back";
-        int hlen = (int)strlen(hints);
-        int hx   = ix1 + (inner_w - hlen) / 2;
-        if (hx < ix1) hx = ix1;
-        fill_rect(ui, ix1, hint_row, ix2, hint_row, hint_a);
-        put_str(ui, hx, hint_row, hints, hintk_a);
-    }
-
-    /* List area */
-    fill_rect(ui, ix1, list_y1, ix2, list_y2, norm_a);
-
-    if (count == 0) {
-        static const char *msg = "No entries - press + or N to add one";
-        int mx = ix1 + (inner_w - (int)strlen(msg)) / 2;
-        int my = list_y1 + (list_y2 - list_y1) / 2;
-        if (mx < ix1) mx = ix1;
-        put_str(ui, mx, my, msg, A_DIM(t));
-        return;
-    }
-
-    /* Scrollbar */
-    if (has_scroll) {
-        int scol  = ix2;
-        int sh    = list_y2 - list_y1 + 1;
-        int thumb = sh > 0 ? (int)((long)cur * sh / count) : 0;
-        for (int i = 0; i < sh; i++) {
-            put_cell(ui, scol, list_y1 + i,
-                     i == thumb ? BLK_FULL : BLK_LIGHT, norm_a);
-        }
-    }
-
-    /* Entry rows */
-    for (int i = 0; i < visible; i++) {
-        int idx = top + i;
-        if (idx < count && list[idx].name[0])
-            draw_dir_entry(ui, ix1, list_y1 + i, eff_w,
-                           &list[idx], idx == cur, has_scroll);
-        else
-            fill_rect(ui, ix1, list_y1 + i, ix1 + eff_w - 1, list_y1 + i, norm_a);
-    }
+    photon_menu_put_padded(ui, 1 + DIR_COL_CUR,                      row, "Name",    name_w,      hdr_a);
+    photon_menu_put_cell  (ui, 1 + DIR_COL_CUR + name_w,             row, ' ',       hdr_a);
+    photon_menu_put_padded(ui, 1 + DIR_COL_CUR + name_w + DIR_COL_SEP, row, "Type", DIR_COL_TYPE, hdr_a);
+    photon_menu_put_cell  (ui, 1 + DIR_COL_CUR + name_w + DIR_COL_SEP + DIR_COL_TYPE, row, ' ', hdr_a);
+    photon_menu_put_padded(ui, 1 + DIR_COL_CUR + name_w + DIR_COL_SEP + DIR_COL_TYPE + 1, row, "Address", addr_w, hdr_a);
 }
 
 /* ── Settings menus (using photon_ui_list for flicker-free overlay) ──── */
@@ -614,51 +492,90 @@ static void run_terminal_size(photon_ui_t *ui, photon_settings_t *s)
     }
 }
 
-/* Enum for settings menu items */
-typedef enum {
-    SOPT_THEME   = 0,
-    SOPT_MODE    = 1,
-    SOPT_FONT_SZ = 2,
-    SOPT_TERM_SZ = 3,
-    SOPT_BELL    = 4,
-    SOPT_ABOUT   = 5,
-    SOPT_COUNT   = 6,
-} settings_opt_t;
-
 /*
- * Run the full settings menu. Uses photon_ui_list for clean save/restore.
- * Pass sdl for in-session use (allows checking resize after return).
+ * Run the full settings menu using photon_menu_form_t.
+ * Full-screen form with ACTION fields for sub-pickers.
  */
 static void run_settings(photon_ui_t *ui, photon_settings_t *s)
 {
-    const char *items[SOPT_COUNT + 1];
-    items[SOPT_THEME]   = "Theme";
-    items[SOPT_MODE]    = "Terminal Mode  (CP437 / UTF-8)";
-    items[SOPT_FONT_SZ] = "Font Size";
-    items[SOPT_TERM_SZ] = "Terminal Size";
-    items[SOPT_ABOUT]   = "About PhotonTERM";
-    items[SOPT_COUNT]   = NULL;
-    char bell_label[64];
-    static int cur = 0;
+    static const photon_hint_t hints[] = {
+        { "Return", " Change  " },
+        { "Space",  " Toggle  " },
+        { "Esc",    " Back" },
+    };
+
+    /* Current value labels (refreshed each loop) */
+    char theme_val[64];
+    char mode_val[64];
+    char font_val[64];
+    char term_val[64];
+
+    photon_menu_form_state_t state = { .field = 0 };
 
     for (;;) {
-        snprintf(bell_label, sizeof(bell_label),
-                 "Visual Bell: %s", s->bell_enabled ? "On " : "Off");
-        items[SOPT_BELL] = bell_label;
-        int sel = photon_ui_list(ui, "Settings", items, SOPT_COUNT, &cur);
-        if (sel < 0) break;
-        cur = sel;
-        switch ((settings_opt_t)sel) {
-            case SOPT_THEME:   run_theme_picker(ui, s);    break;
-            case SOPT_MODE:    run_terminal_mode(ui, s);   break;
-            case SOPT_FONT_SZ: run_font_size(ui, s);       break;
-            case SOPT_TERM_SZ: run_terminal_size(ui, s);   break;
-            case SOPT_BELL:
+        /* Refresh display values */
+        strlcpy(theme_val, photon_themes[photon_active_theme].name, sizeof(theme_val));
+
+        if (s->font_mode == PHOTON_FONT_BITMAP)
+            strlcpy(mode_val, "CP437 (BBS art)", sizeof(mode_val));
+        else
+            strlcpy(mode_val, "UTF-8 (Unicode)", sizeof(mode_val));
+
+        snprintf(font_val, sizeof(font_val), "%dpt", s->ttf_size_pt);
+        snprintf(term_val, sizeof(term_val), "%d x %d", s->cols, s->rows);
+
+        photon_menu_field_t fields[] = {
+            { "Theme",         PHOTON_MENU_FIELD_ACTION, theme_val, sizeof(theme_val), NULL, NULL, NULL },
+            { "Terminal Mode", PHOTON_MENU_FIELD_ACTION, mode_val,  sizeof(mode_val),  NULL, NULL, NULL },
+            { "Font Size",     PHOTON_MENU_FIELD_ACTION, font_val,  sizeof(font_val),  NULL, NULL, NULL },
+            { "Terminal Size", PHOTON_MENU_FIELD_ACTION, term_val,  sizeof(term_val),  NULL, NULL, NULL },
+            { "Visual Bell",   PHOTON_MENU_FIELD_TOGGLE, NULL, 0, &s->bell_enabled, NULL, NULL },
+            { NULL,            PHOTON_MENU_FIELD_SEPARATOR, NULL, 0, NULL, NULL, NULL },
+            { NULL,            PHOTON_MENU_FIELD_BUTTON, NULL, 0, NULL, "[ About PhotonTERM ]", NULL },
+        };
+        int nfields = sizeof(fields) / sizeof(fields[0]);
+
+        photon_menu_form_t form = {
+            .title   = "Settings",
+            .fields  = fields,
+            .nfields = nfields,
+            .hints   = hints,
+            .nhints  = sizeof(hints) / sizeof(hints[0]),
+        };
+
+        photon_menu_draw_form(ui, &form, &state);
+        photon_sdl_present(photon_ui_sdl(ui));
+
+        photon_key_t key = {0};
+        if (!photon_sdl_wait_key(photon_ui_sdl(ui), &key, 100)) continue;
+        if (key.code == 0) continue;
+
+        /* Escape -> back */
+        if (key.code == '\x1b' || key.code == PHOTON_KEY_QUIT) break;
+
+        /* Form navigation (arrows, tab, space for toggle) */
+        if (photon_menu_form_handle_nav(&key, &state, &form)) {
+            /* Toggle: also persist bell change immediately */
+            g_bell_enabled = s->bell_enabled;
+            photon_settings_save(s);
+            continue;
+        }
+
+        /* Enter on a field -> action */
+        if (key.code == '\r') {
+            int fi = photon_menu_form_focus_to_field(&form, state.field);
+            if (fi < 0) continue;
+            switch (fi) {
+            case 0: run_theme_picker(ui, s);    break;
+            case 1: run_terminal_mode(ui, s);   break;
+            case 2: run_font_size(ui, s);       break;
+            case 3: run_terminal_size(ui, s);   break;
+            case 4: /* Toggle on Enter too */
                 s->bell_enabled = !s->bell_enabled;
                 g_bell_enabled  = s->bell_enabled;
                 photon_settings_save(s);
                 break;
-            case SOPT_ABOUT: {
+            case 6: { /* About */
                 char about[512];
                 snprintf(about, sizeof(about),
                          "%s\n\n"
@@ -672,6 +589,7 @@ static void run_settings(photon_ui_t *ui, photon_settings_t *s)
                 break;
             }
             default: break;
+            }
         }
     }
 }
@@ -895,78 +813,68 @@ static photon_bbs_t *run_directory(photon_ui_t *ui, photon_settings_t *s,
     int count = photon_store_load(list, MAX_BBS_ENTRIES, NULL, 0);
     if (count < 0) count = 0;
 
-    int W = tcols(ui);
-    int H = trows(ui);
-
-    /* Box coordinates: nearly full screen (x=2..W-1, y=2..H-2) */
-    int x1 = 2, y1 = 2;
-    int x2 = W - 1, y2 = H - 2;
-
-    int cur    = 0;
-    int top    = 0;
-    int sort_mode = 0;  /* 0=manual order, 1=name, 2=last-connected, 3=calls */
-    bool redraw = true;
+    int sort_mode = 0;
+    photon_menu_list_state_t state = { .cursor = 0, .scroll = 0 };
     photon_bbs_t *result = NULL;
-    bool done  = false;
+    bool done = false;
 
     /* Pre-select the entry matching reselect (e.g. after disconnect) */
     if (reselect && reselect->name[0]) {
         PHOTON_DBG("reselect: looking for name='%s' addr='%s' port=%d type=%d",
                    reselect->name, reselect->addr, reselect->port, reselect->conn_type);
-        bool found = false;
         for (int i = 0; i < count; i++) {
             if (strcmp(list[i].name, reselect->name) == 0
                 && strcmp(list[i].addr, reselect->addr) == 0
                 && list[i].port == reselect->port
                 && list[i].conn_type == reselect->conn_type) {
-                cur = i;
-                found = true;
+                state.cursor = i;
                 PHOTON_DBG("reselect: matched entry %d '%s'", i, list[i].name);
                 break;
             }
         }
-        if (!found) {
-            PHOTON_DBG("reselect: NO MATCH found in %d entries", count);
-            for (int i = 0; i < count; i++) {
-                PHOTON_DBG("  entry[%d]: name='%s' addr='%s' port=%d type=%d",
-                           i, list[i].name, list[i].addr, list[i].port, list[i].conn_type);
-            }
-        }
-    } else {
-        PHOTON_DBG("reselect: NULL or empty");
     }
 
+    static const photon_hint_t hints[] = {
+        { "Return", " Connect  " },
+        { "E",      " Edit  " },
+        { "+/N",    " New  " },
+        { "-/D",    " Delete  " },
+        { "S",      " Sort  " },
+        { "Tab",    " Settings  " },
+        { "Esc",    " Back" },
+    };
+
     while (!done) {
-        int visible = (y2 - 2) - (y1 + 1);   /* list_y2 - list_y1 + 1 */
-        if (visible < 1) visible = 1;
+        char title[80];
+        snprintf(title, sizeof(title), "Directory%s", sort_mode_name(sort_mode));
 
-        /* Clamp cursor */
-        if (count > 0) {
-            if (cur < 0)      cur = 0;
-            if (cur >= count) cur = count - 1;
-        } else {
-            cur = 0;
-        }
-        if (top > cur)           top = cur;
-        if (top + visible <= cur) top = cur - visible + 1;
-        if (top < 0)             top = 0;
+        photon_menu_list_t menu = {
+            .title       = title,
+            .items       = list,
+            .count       = count,
+            .empty_msg   = "No entries - press + or N to add one",
+            .draw_item   = dir_draw_item,
+            .hints       = hints,
+            .nhints      = sizeof(hints) / sizeof(hints[0]),
+            .header_rows = 1,
+            .draw_header = dir_draw_header,
+        };
 
-        if (redraw) {
-            /* Clear full screen background first */
-            const photon_theme_t *t = active_theme();
-            fill_rect(ui, 1, 1, W, H - 1, A_NORM(t));
-            if (count > 0)
-                draw_entry_statusbar(ui, &list[cur]);
-            else
-                draw_statusbar(ui, false, NULL);
-            redraw_dir(ui, x1, y1, x2, y2, list, count, cur, top, false, sort_mode);
-            photon_sdl_present(photon_ui_sdl(ui));
-            redraw = false;
-        }
+        int visible = photon_menu_draw_list(ui, &menu, &state);
+
+        /* Status bar: show entry info for selected item */
+        if (count > 0 && state.cursor >= 0 && state.cursor < count)
+            draw_entry_statusbar(ui, &list[state.cursor]);
+
+        photon_sdl_present(photon_ui_sdl(ui));
 
         photon_key_t key = {0};
         if (!photon_sdl_wait_key(photon_ui_sdl(ui), &key, 100)) continue;
         if (key.code == 0) continue;
+
+        /* Standard list navigation (arrows, pgup/dn, home/end) */
+        if (photon_menu_list_handle_nav(&key, &state, count, visible))
+            continue;
 
         switch (key.code) {
         case PHOTON_KEY_QUIT:
@@ -974,43 +882,14 @@ static photon_bbs_t *run_directory(photon_ui_t *ui, photon_settings_t *s,
             done = true;
             break;
 
-        case PHOTON_KEY_UP:
-            if (count > 0 && cur > 0) { cur--; redraw = true; }
-            break;
-
-        case PHOTON_KEY_DOWN:
-            if (count > 0 && cur < count - 1) { cur++; redraw = true; }
-            break;
-
-        case PHOTON_KEY_PGUP:
-            if (count > 0) { cur -= visible - 1; if (cur < 0) cur = 0; redraw = true; }
-            break;
-
-        case PHOTON_KEY_PGDN:
-            if (count > 0) {
-                cur += visible - 1;
-                if (cur >= count) cur = count - 1;
-                redraw = true;
-            }
-            break;
-
-        case PHOTON_KEY_HOME:
-            if (count > 0) { cur = 0; redraw = true; }
-            break;
-
-        case PHOTON_KEY_END:
-            if (count > 0) { cur = count - 1; redraw = true; }
-            break;
-
         case '\r': case ' ':
-            /* Connect */
             if (count > 0) {
                 result = malloc(sizeof(*result));
                 if (result) {
-                    *result = list[cur];
+                    *result = list[state.cursor];
                     result->last_connected = time(NULL);
                     result->calls++;
-                    list[cur] = *result;
+                    list[state.cursor] = *result;
                     photon_store_save(list, count);
                 }
                 done = true;
@@ -1018,7 +897,6 @@ static photon_bbs_t *run_directory(photon_ui_t *ui, photon_settings_t *s,
             break;
 
         case 'N': case 'n': case '+':
-            /* New entry */
             if (count < MAX_BBS_ENTRIES) {
                 photon_bbs_t nb;
                 memset(&nb, 0, sizeof(nb));
@@ -1026,62 +904,52 @@ static photon_bbs_t *run_directory(photon_ui_t *ui, photon_settings_t *s,
                 nb.port      = 23;
                 nb.added     = time(NULL);
                 nb.id        = count;
-                PHOTON_DBG("N: flushing keys before edit");
                 photon_sdl_flush_keys(photon_ui_sdl(ui));
-                PHOTON_DBG("N: calling photon_bbs_edit");
                 if (photon_bbs_edit(ui, &nb, true)) {
                     list[count++] = nb;
-                    cur = count - 1;
+                    state.cursor = count - 1;
                     photon_store_save(list, count);
                 }
             }
-            redraw = true;
             break;
 
         case 'E': case 'e':
-            /* Edit */
             if (count > 0) {
                 photon_sdl_flush_keys(photon_ui_sdl(ui));
-                if (photon_bbs_edit(ui, &list[cur], false))
+                if (photon_bbs_edit(ui, &list[state.cursor], false))
                     photon_store_save(list, count);
             }
-            redraw = true;
             break;
 
         case 'D': case 'd': case '-':
         case PHOTON_KEY_DEL:
-            /* Delete */
             if (count > 0) {
                 photon_sdl_flush_keys(photon_ui_sdl(ui));
                 if (photon_ui_confirm(ui, "Delete this entry?")) {
-                    for (int i = cur; i < count - 1; i++)
+                    for (int i = state.cursor; i < count - 1; i++)
                         list[i] = list[i+1];
                     count--;
-                    if (cur >= count && cur > 0) cur = count - 1;
+                    if (state.cursor >= count && state.cursor > 0)
+                        state.cursor = count - 1;
                     for (int i = 0; i < count; i++) list[i].id = i;
                     photon_store_save(list, count);
                 }
             }
-            redraw = true;
             break;
 
-        case '\t': /* Tab -> Settings */
-        {
+        case '\t':
             photon_sdl_flush_keys(photon_ui_sdl(ui));
             run_settings(ui, s);
-            redraw = true;
-        }
-        break;
-
-        case 'S': case 's':
-            /* Cycle sort modes: manual -> name -> recent -> calls -> manual */
-            sort_mode = (sort_mode + 1) % 4;
-            apply_sort(list, count, sort_mode);
-            cur = 0; top = 0;
-            redraw = true;
             break;
 
-        case '\x1b': /* ESC - back to splash */
+        case 'S': case 's':
+            sort_mode = (sort_mode + 1) % 4;
+            apply_sort(list, count, sort_mode);
+            state.cursor = 0;
+            state.scroll = 0;
+            break;
+
+        case '\x1b':
             done = true;
             break;
 
@@ -1090,7 +958,6 @@ static photon_bbs_t *run_directory(photon_ui_t *ui, photon_settings_t *s,
                 if (quit_out) *quit_out = true;
                 done = true;
             }
-            redraw = true;
             break;
 
         default:
@@ -1098,11 +965,10 @@ static photon_bbs_t *run_directory(photon_ui_t *ui, photon_settings_t *s,
             if (key.code >= ' ' && key.code <= '~' && count > 0) {
                 char ch = (char)key.code;
                 for (int i = 1; i <= count; i++) {
-                    int next = (cur + i) % count;
+                    int next = (state.cursor + i) % count;
                     if (tolower((unsigned char)list[next].name[0])
                         == tolower((unsigned char)ch)) {
-                        cur = next;
-                        redraw = true;
+                        state.cursor = next;
                         break;
                     }
                 }
@@ -1125,9 +991,6 @@ photon_bbs_t *photon_bbslist_run(photon_ui_t *ui, bool start_in_directory,
     photon_settings_load(&s);
     int theme_idx = photon_theme_find(s.theme_name);
     photon_theme_apply(theme_idx, photon_ui_sdl(ui), &s);
-
-    int W = tcols(ui);
-    int H = trows(ui);
 
     photon_bbs_t *result = NULL;
     bool done = false;
@@ -1168,12 +1031,6 @@ photon_bbs_t *photon_bbslist_run(photon_ui_t *ui, bool start_in_directory,
 
             case '\t': /* Tab -> Settings from splash */
                 {
-                    /* Draw directory background first so settings overlay is readable */
-                    const photon_theme_t *t = active_theme();
-                    fill_rect(ui, 1, 1, W, H - 1, A_NORM(t));
-                    draw_statusbar(ui, false, NULL);
-                    photon_sdl_present(photon_ui_sdl(ui));
-
                     run_settings(ui, &s);
                 }
                 break;

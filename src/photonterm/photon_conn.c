@@ -1048,6 +1048,10 @@ static bool conn_shell_connect(const photon_bbs_t *bbs)
             struct passwd *pw = getpwuid(getuid());
             if (pw && pw->pw_dir) setenv("HOME", pw->pw_dir, 1);
         }
+        /* Change to home directory so the shell starts there.
+         * When launched from Finder the cwd is / (inherited from launchd). */
+        const char *home = getenv("HOME");
+        if (home && home[0]) chdir(home);
         if (!getenv("SHELL")) {
             struct passwd *pw = getpwuid(getuid());
             if (pw && pw->pw_shell && pw->pw_shell[0])

@@ -23,6 +23,7 @@
 #include "photon_term.h"
 #include "photon_conn.h"
 #include "photon_ui.h"
+#include "photon_menu.h"
 #include "photon_bbslist.h"
 #include "photon_settings.h"
 #include "photon_xfer.h"
@@ -263,38 +264,87 @@ typedef enum {
     SESSION_MENU_XFER       =  4,
 } session_menu_result_t;
 
+/* Item renderer for the session menu list */
+static void session_draw_item(photon_ui_t *ui,
+                              void *items, int index,
+                              int row, int col_start, int col_end,
+                              bool selected,
+                              const photon_theme_t *t)
+{
+    const char **labels = (const char **)items;
+    int w = col_end - col_start + 1;
+    uint8_t a = selected ? PHOTON_MENU_A_SEL(t) : PHOTON_MENU_A_NORM(t);
+
+    photon_menu_fill_rect(ui, col_start, row, col_end, row, a);
+    if (selected)
+        photon_menu_put_cell(ui, col_start, row, 0x25B8, PHOTON_MENU_A_SEL_HI(t)); /* ▸ */
+    else
+        photon_menu_put_cell(ui, col_start, row, ' ', a);
+    photon_menu_put_cell(ui, col_start + 1, row, ' ', a);
+    photon_menu_put_padded(ui, col_start + 2, row, labels[index], w - 2, a);
+}
+
 static session_menu_result_t show_session_menu(photon_ui_t *ui,
                                                photon_sdl_t *sdl, vte_t *vte,
                                                const photon_bbs_t *bbs,
                                                photon_settings_t *settings)
 {
-    const char *items[] = {
+    (void)settings;
+
+    static const char *labels[] = {
         "Disconnect",
         "New Tab",
         "Exit PhotonTERM",
         "Settings",
         "File Transfer (ZModem/YModem/XModem)",
-        NULL
     };
+    int nitems = 5;
 
     char title[128];
     snprintf(title, sizeof(title), "Session: %s",
              bbs && bbs->name[0] ? bbs->name : "Connected");
 
-    /* photon_ui_list saves/restores screen internally */
-    int choice = photon_ui_list(ui, title, items, 5, 0);
+    static const photon_hint_t hints[] = {
+        { "Return", " Select  " },
+        { "Esc",    " Back" },
+    };
 
-    /* Repaint the terminal under the closed menu */
-    photon_sdl_repaint(sdl, vte);
-    photon_sdl_present(sdl);
+    photon_menu_list_state_t state = { .cursor = 0, .scroll = 0 };
 
-    switch (choice) {
-        case 0:  return SESSION_MENU_DISCONNECT;
-        case 1:  return SESSION_MENU_NEWTAB;
-        case 2:  return SESSION_MENU_QUIT;
-        case 3:  return SESSION_MENU_SETTINGS;
-        case 4:  return SESSION_MENU_XFER;
-        default: return SESSION_MENU_NONE;  /* cancelled */
+    for (;;) {
+        photon_menu_list_t menu = {
+            .title       = title,
+            .items       = labels,
+            .count       = nitems,
+            .empty_msg   = NULL,
+            .draw_item   = session_draw_item,
+            .hints       = hints,
+            .nhints      = sizeof(hints) / sizeof(hints[0]),
+            .header_rows = 0,
+            .draw_header = NULL,
+        };
+
+        int visible = photon_menu_draw_list(ui, &menu, &state);
+        photon_sdl_present(sdl);
+
+        photon_key_t key = {0};
+        if (!photon_sdl_wait_key(sdl, &key, 100)) continue;
+        if (key.code == 0) continue;
+
+        if (key.code == '\x1b' || key.code == PHOTON_KEY_QUIT) {
+            photon_sdl_repaint(sdl, vte);
+            photon_sdl_present(sdl);
+            return SESSION_MENU_NONE;
+        }
+
+        if (photon_menu_list_handle_nav(&key, &state, nitems, visible))
+            continue;
+
+        if (key.code == '\r' || key.code == ' ') {
+            photon_sdl_repaint(sdl, vte);
+            photon_sdl_present(sdl);
+            return (session_menu_result_t)state.cursor;
+        }
     }
 }
 
