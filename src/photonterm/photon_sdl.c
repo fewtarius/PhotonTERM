@@ -558,6 +558,9 @@ void photon_sdl_load_cga_palette(photon_sdl_t *ctx)
     photon_sdl_load_ansi_palette(ctx);
 }
 
+/* Forward declaration - defined after colour helpers */
+static SDL_Rect cell_rect(const photon_sdl_t *ctx, int col, int row);
+
 bool photon_sdl_get_selection(const photon_sdl_t *ctx,
                                int *c0, int *r0, int *c1, int *r1)
 {
@@ -586,6 +589,35 @@ void photon_sdl_clear_selection(photon_sdl_t *ctx)
 bool photon_sdl_sel_active(const photon_sdl_t *ctx)
 {
     return ctx && ctx->sel_active;
+}
+
+void photon_sdl_draw_selection(photon_sdl_t *ctx, int c0, int r0, int c1, int r1,
+                               int visible_rows)
+{
+    if (!ctx || !ctx->ren) return;
+
+    SDL_SetRenderDrawBlendMode(ctx->ren, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(ctx->ren, 255, 255, 255, 80);
+
+    for (int r = r0; r <= r1 && r < visible_rows; r++) {
+        int ca, cb;
+        if (r0 == r1) {
+            ca = c0; cb = c1;
+        } else if (r == r0) {
+            ca = c0; cb = ctx->cols - 1;
+        } else if (r == r1) {
+            ca = 0; cb = c1;
+        } else {
+            ca = 0; cb = ctx->cols - 1;
+        }
+        /* 1-based cell rect */
+        SDL_Rect left  = cell_rect(ctx, ca + 1, r + 1);
+        SDL_Rect right = cell_rect(ctx, cb + 1, r + 1);
+        SDL_Rect span = { left.x, left.y, right.x + right.w - left.x, left.h };
+        SDL_RenderFillRect(ctx->ren, &span);
+    }
+
+    SDL_SetRenderDrawBlendMode(ctx->ren, SDL_BLENDMODE_NONE);
 }
 
 /* ── Colour helpers ─────────────────────────────────────────────────── */
@@ -1095,6 +1127,15 @@ static void translate_sdl_event(photon_sdl_t *ctx, const SDL_Event *ev)
         (ev->button.button == SDL_BUTTON_MIDDLE || ev->button.button == SDL_BUTTON_RIGHT)) {
         photon_key_t k = { .code = PHOTON_KEY_PASTE };
         kq_push(&ctx->keys, k);
+        return;
+    }
+
+    /* Mouse wheel: scroll up enters/scrolls scrollback */
+    if (ev->type == SDL_MOUSEWHEEL) {
+        if (ev->wheel.y > 0) {
+            photon_key_t k = { .code = PHOTON_KEY_SCROLL_UP };
+            kq_push(&ctx->keys, k);
+        }
         return;
     }
 

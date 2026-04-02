@@ -142,7 +142,8 @@ OBJ := $(OBJDIR)/photon_main.o \
        $(OBJDIR)/photon_store.o \
        $(OBJDIR)/photon_settings.o \
        $(OBJDIR)/photon_debug.o \
-       $(OBJDIR)/photon_terminus_font.o
+       $(OBJDIR)/photon_terminus_font.o \
+       $(OBJDIR)/photon_menu.o
 
 ifeq ($(os),darwin)
   OBJ += $(OBJDIR)/DarwinWrappers.o

@@ -300,10 +300,98 @@ static session_menu_result_t show_session_menu(photon_ui_t *ui,
 
 /* ── Scrollback viewer ───────────────────────────────────────────────── */
 
+/* Get a cell from the combined scrollback+screen buffer.
+ * line is an absolute index: 0..sb_lines-1 = scrollback, sb_lines.. = live.
+ * Returns false if out of range. */
+static bool sb_get_cell(vte_t *vte, int line, int col, int sb_lines,
+                        int cols, vte_cell_t *row_buf, vte_cell_t *out)
+{
+    vte_cell_t blank = { ' ', VTE_COLOR_DEFAULT_FG, VTE_COLOR_DEFAULT_BG, 0 };
+    if (col < 0 || col >= cols) { *out = blank; return false; }
+    if (line < sb_lines) {
+        if (!vte_scrollback_get(vte, line, row_buf, NULL)) { *out = blank; return false; }
+        *out = row_buf[col];
+        return true;
+    }
+    int screen_row = line - sb_lines;
+    vte_cell_t cell;
+    if (vte_get_cell(vte, col + 1, screen_row + 1, &cell)) {
+        *out = cell;
+        return true;
+    }
+    *out = blank;
+    return false;
+}
+
+/* Copy text from the scrollback viewer selection to clipboard.
+ * Coords are viewport-relative (0-based col, 0-based row within visible area).
+ * scroll_top maps viewport rows to absolute buffer lines. */
+static void sb_copy_selection(vte_t *vte, photon_sdl_t *sdl,
+                              int sc, int sr, int ec, int er,
+                              int scroll_top, int sb_lines, int cols)
+{
+    /* Normalize so (sr,sc) <= (er,ec) */
+    if (sr > er || (sr == er && sc > ec)) {
+        int t = sr; sr = er; er = t;
+        t = sc; sc = ec; ec = t;
+    }
+
+    vte_cell_t *row_buf = calloc((size_t)cols, sizeof(vte_cell_t));
+    if (!row_buf) return;
+
+    size_t bufsz = (size_t)(er - sr + 1) * ((size_t)cols * 4 + 2) + 1;
+    char *buf = malloc(bufsz);
+    if (!buf) { free(row_buf); return; }
+
+    size_t pos = 0;
+    for (int r = sr; r <= er; r++) {
+        int ca = (r == sr) ? sc : 0;
+        int cb = (r == er) ? ec : cols - 1;
+        int abs_line = scroll_top + r;
+
+        /* Find last non-space character for trimming */
+        int last_nonsp = ca - 1;
+        for (int c = ca; c <= cb; c++) {
+            vte_cell_t cell;
+            if (sb_get_cell(vte, abs_line, c, sb_lines, cols, row_buf, &cell)
+                && cell.codepoint > 0x20)
+                last_nonsp = c;
+        }
+        for (int c = ca; c <= last_nonsp && pos + 5 < bufsz; c++) {
+            vte_cell_t cell;
+            uint32_t cp = ' ';
+            if (sb_get_cell(vte, abs_line, c, sb_lines, cols, row_buf, &cell)
+                && cell.codepoint >= 0x20)
+                cp = cell.codepoint;
+            if (cp < 0x80) {
+                buf[pos++] = (char)cp;
+            } else if (cp < 0x800) {
+                buf[pos++] = (char)(0xC0 | (cp >> 6));
+                buf[pos++] = (char)(0x80 | (cp & 0x3F));
+            } else if (cp < 0x10000) {
+                buf[pos++] = (char)(0xE0 | (cp >> 12));
+                buf[pos++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+                buf[pos++] = (char)(0x80 | (cp & 0x3F));
+            } else {
+                buf[pos++] = (char)(0xF0 | (cp >> 18));
+                buf[pos++] = (char)(0x80 | ((cp >> 12) & 0x3F));
+                buf[pos++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+                buf[pos++] = (char)(0x80 | (cp & 0x3F));
+            }
+        }
+        if (r < er && pos + 1 < bufsz) buf[pos++] = '\n';
+    }
+    buf[pos] = '\0';
+    if (pos > 0) SDL_SetClipboardText(buf);
+    free(buf);
+    free(row_buf);
+}
+
 /* Display the scrollback buffer.  The terminal content is not scrolled -
  * we paint scrollback lines directly over the SDL surface and let the user
- * navigate with arrow keys / PgUp / PgDn / Home / End.  ESC or any other
- * key returns to live terminal. */
+ * navigate with arrow keys / PgUp / PgDn / Home / End / mouse wheel.
+ * Mouse drag selects text and copies to clipboard on release.
+ * ESC, Enter, or q returns to live terminal. */
 static void run_scrollback_viewer(vte_t *vte, photon_sdl_t *sdl)
 {
     int sb_lines = vte_scrollback_lines(vte);
@@ -313,22 +401,36 @@ static void run_scrollback_viewer(vte_t *vte, photon_sdl_t *sdl)
 
     int cols = photon_sdl_cols(sdl);
     int rows = photon_sdl_rows(sdl);
+    int cell_w = photon_sdl_cell_width(sdl);
+    int cell_h = photon_sdl_cell_height(sdl);
     int visible = rows - 1;  /* reserve bottom row for status bar */
     if (visible < 1) visible = 1;
 
     vte_cell_t *row_buf = calloc((size_t)cols, sizeof(vte_cell_t));
     if (!row_buf) return;
 
-    /* Start at bottom (live screen visible) */
+    /* Start at bottom (live screen visible), then scroll up 3 lines
+     * so the user immediately sees scrollback content */
     int scroll_top = total - visible;
+    if (scroll_top < 0) scroll_top = 0;
+    scroll_top -= 3;
     if (scroll_top < 0) scroll_top = 0;
 
     bool redraw = true;
     bool done   = false;
 
+    /* Mouse selection state (viewport-relative, 0-based) */
+    bool sel_dragging = false;
+    bool sel_have     = false;
+    int  sel_sc = 0, sel_sr = 0;   /* start col/row */
+    int  sel_ec = 0, sel_er = 0;   /* end col/row */
+
     /* Status bar colours (bright white on blue, bold) */
     vte_cell_t sb_bar_bg = { ' ', 15, 4, VTE_ATTR_BOLD };
     vte_cell_t blank = { ' ', VTE_COLOR_DEFAULT_FG, VTE_COLOR_DEFAULT_BG, 0 };
+
+    /* Clear any live-terminal selection so it doesn't bleed through */
+    photon_sdl_clear_selection(sdl);
 
     while (!done) {
         if (redraw) {
@@ -358,10 +460,22 @@ static void run_scrollback_viewer(vte_t *vte, photon_sdl_t *sdl)
                         photon_sdl_draw_cell(sdl, c + 1, r + 1, &blank);
                 }
             }
+
+            /* Draw selection highlight overlay */
+            if (sel_have || sel_dragging) {
+                int r0 = sel_sr, c0 = sel_sc, r1 = sel_er, c1 = sel_ec;
+                /* Normalize */
+                if (r0 > r1 || (r0 == r1 && c0 > c1)) {
+                    int t = r0; r0 = r1; r1 = t;
+                    t = c0; c0 = c1; c1 = t;
+                }
+                photon_sdl_draw_selection(sdl, c0, r0, c1, r1, visible);
+            }
+
             /* Status bar on bottom row */
             char status[128];
             snprintf(status, sizeof(status),
-                     " SCROLLBACK  Line %d/%d  Up/Dn  PgUp/PgDn  Home/End  ESC=exit",
+                     " SCROLLBACK  %d/%d  Arrows  PgUp/Dn  Wheel  Home/End  ESC=exit",
                      scroll_top + 1, total);
             int slen = (int)strlen(status);
             for (int c = 0; c < cols; c++) {
@@ -376,10 +490,82 @@ static void run_scrollback_viewer(vte_t *vte, photon_sdl_t *sdl)
         SDL_Event ev;
         if (!SDL_WaitEventTimeout(&ev, 50)) continue;
         if (ev.type == SDL_QUIT) { done = true; break; }
+
+        int prev_top = scroll_top;
+
+        /* Mouse wheel: scroll 3 lines per tick */
+        if (ev.type == SDL_MOUSEWHEEL) {
+            if (ev.wheel.y > 0)
+                scroll_top -= 3;
+            else if (ev.wheel.y < 0)
+                scroll_top += 3;
+            /* Clamp */
+            int max_top = total - visible;
+            if (max_top < 0) max_top = 0;
+            if (scroll_top < 0) scroll_top = 0;
+            if (scroll_top > max_top) scroll_top = max_top;
+            if (scroll_top != prev_top) redraw = true;
+            continue;
+        }
+
+        /* Mouse button down: start selection */
+        if (ev.type == SDL_MOUSEBUTTONDOWN && ev.button.button == SDL_BUTTON_LEFT) {
+            sel_have     = false;
+            sel_dragging = true;
+            int mc = ev.button.x / cell_w;
+            int mr = ev.button.y / cell_h;
+            if (mc < 0) mc = 0;
+            if (mr < 0) mr = 0;
+            if (mc >= cols) mc = cols - 1;
+            if (mr >= visible) mr = visible - 1;
+            sel_sc = sel_ec = mc;
+            sel_sr = sel_er = mr;
+            redraw = true;
+            continue;
+        }
+
+        /* Mouse drag: extend selection */
+        if (ev.type == SDL_MOUSEMOTION && sel_dragging) {
+            int mc = ev.motion.x / cell_w;
+            int mr = ev.motion.y / cell_h;
+            if (mc < 0) mc = 0;
+            if (mr < 0) mr = 0;
+            if (mc >= cols) mc = cols - 1;
+            if (mr >= visible) mr = visible - 1;
+            sel_ec = mc;
+            sel_er = mr;
+            sel_have = true;
+            redraw = true;
+            continue;
+        }
+
+        /* Mouse button up: finalize selection and copy */
+        if (ev.type == SDL_MOUSEBUTTONUP && ev.button.button == SDL_BUTTON_LEFT
+                && sel_dragging) {
+            sel_dragging = false;
+            int mc = ev.button.x / cell_w;
+            int mr = ev.button.y / cell_h;
+            if (mc < 0) mc = 0;
+            if (mr < 0) mr = 0;
+            if (mc >= cols) mc = cols - 1;
+            if (mr >= visible) mr = visible - 1;
+            sel_ec = mc;
+            sel_er = mr;
+            /* Single-cell click with no movement = deselect */
+            if (sel_sc == mc && sel_sr == mr) {
+                sel_have = false;
+            } else {
+                sel_have = true;
+                sb_copy_selection(vte, sdl, sel_sc, sel_sr, sel_ec, sel_er,
+                                  scroll_top, sb_lines, cols);
+            }
+            redraw = true;
+            continue;
+        }
+
         if (ev.type != SDL_KEYDOWN) continue;
 
         SDL_Keycode sym = ev.key.keysym.sym;
-        int prev_top = scroll_top;
 
         switch (sym) {
         case SDLK_ESCAPE: case SDLK_RETURN: case SDLK_q:
@@ -491,9 +677,11 @@ photon_term_result_t photon_doterm(vte_t *vte, photon_sdl_t *sdl,
                     break;
                 }
 
-                /* PageUp (optionally with Shift) or Cmd+Up: open scrollback viewer */
+                /* PageUp (optionally with Shift), Cmd+Up, or mouse wheel up:
+                 * open scrollback viewer */
                 if ((k.code == PHOTON_KEY_PGUP && !(k.mod & ~PHOTON_MOD_SHIFT))
-                    || (k.code == PHOTON_KEY_UP && (k.mod & PHOTON_MOD_META))) {
+                    || (k.code == PHOTON_KEY_UP && (k.mod & PHOTON_MOD_META))
+                    || k.code == PHOTON_KEY_SCROLL_UP) {
                     run_scrollback_viewer(vte, sdl);
                     dirty = true;
                     continue;

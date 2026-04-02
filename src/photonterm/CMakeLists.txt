@@ -31,6 +31,7 @@ set(PHOTON_SOURCES
     photon_settings.c
     photon_debug.c
     photon_terminus_font.c
+    photon_menu.c
 )
 
 if(APPLE)

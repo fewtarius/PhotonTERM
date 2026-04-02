@@ -67,6 +67,7 @@ typedef enum {
 #define PHOTON_KEY_QUIT     278     /* window close button */
 #define PHOTON_KEY_COPY_SEL 279     /* mouse selection complete - copy to clipboard */
 #define PHOTON_KEY_PASTE    280     /* middle/right click - paste from clipboard */
+#define PHOTON_KEY_SCROLL_UP 281    /* mouse wheel up - enter/scroll scrollback */
 
 typedef struct {
     int     code;       /* ASCII 1-127, or PHOTON_KEY_*, or 0 for no event */
@@ -212,6 +213,12 @@ bool photon_sdl_get_selection(const photon_sdl_t *ctx,
                                int *c0, int *r0, int *c1, int *r1);
 void photon_sdl_clear_selection(photon_sdl_t *ctx);
 bool photon_sdl_sel_active(const photon_sdl_t *ctx);  /* true while mouse dragging */
+
+/* Draw a selection highlight overlay on already-rendered cells.
+ * Coords are 0-based viewport col/row (normalized: start <= end).
+ * visible_rows excludes the status bar row. */
+void photon_sdl_draw_selection(photon_sdl_t *ctx, int c0, int r0, int c1, int r1,
+                               int visible_rows);
 
 /* ── VTE callback adapter ─────────────────────────────────────────────── */
 
