@@ -38,6 +38,16 @@
 /* Tab switch target (0-based index), written before returning PHOTON_TERM_SWITCH_TAB */
 int photon_switch_tab_target = 0;
 
+/* Custom session menu callback (set by host apps like MIRA) */
+static photon_session_menu_fn s_session_menu_fn = NULL;
+static void *s_session_menu_userdata = NULL;
+
+void photon_term_set_session_menu(photon_session_menu_fn fn, void *userdata)
+{
+    s_session_menu_fn = fn;
+    s_session_menu_userdata = userdata;
+}
+
 /* ── Alt-held tab bar overlay ────────────────────────────────────────── */
 
 /* Draw a one-row overlay on the bottom row showing tab list.
@@ -498,6 +508,21 @@ photon_term_result_t photon_doterm(vte_t *vte, photon_sdl_t *sdl,
                     photon_sdl_save_palette(sdl, saved_pal);
                     photon_sdl_set_ttf_mode(sdl, false);
                     photon_theme_apply(photon_active_theme, sdl, NULL);
+
+                    /* Use custom session menu if host app registered one */
+                    if (s_session_menu_fn) {
+                        photon_term_result_t mr = s_session_menu_fn(
+                            ui, sdl, vte, bbs, settings, s_session_menu_userdata);
+                        photon_sdl_restore_palette(sdl, saved_pal);
+                        photon_sdl_set_ttf_mode(sdl, was_ttf);
+                        if (mr == PHOTON_TERM_RESUME) {
+                            dirty = true;
+                        } else {
+                            result = mr;
+                            done   = true;
+                        }
+                        break;
+                    }
 
                     session_menu_result_t m = show_session_menu(ui, sdl, vte, bbs, settings);
 

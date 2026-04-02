@@ -32,7 +32,20 @@ typedef enum {
     PHOTON_TERM_QUIT,            /* user closed window / requested app exit  */
     PHOTON_TERM_NEWTAB,          /* user requested new tab (Alt-W)           */
     PHOTON_TERM_SWITCH_TAB,      /* user switched tab; check photon_switch_tab_target */
+    PHOTON_TERM_RESUME,          /* menu closed, resume terminal (no action) */
 } photon_term_result_t;
+
+/* Session menu callback type.
+ * Host apps can override the Alt-Z session menu by setting this callback.
+ * Return PHOTON_TERM_RESUME to return to the terminal with no action. */
+typedef photon_term_result_t (*photon_session_menu_fn)(
+    photon_ui_t *ui, photon_sdl_t *sdl, vte_t *vte,
+    const photon_bbs_t *bbs, photon_settings_t *settings,
+    void *userdata);
+
+/* Set a custom session menu callback (replaces the built-in Alt-Z menu).
+ * Pass NULL to restore the default PhotonTERM session menu. */
+void photon_term_set_session_menu(photon_session_menu_fn fn, void *userdata);
 
 /* Run one terminal session.
  *
