@@ -117,6 +117,7 @@ void   vte_resize(vte_t *vte, int cols, int rows);
 
 /* Read current cursor position (1-based). */
 void   vte_cursor_pos(const vte_t *vte, int *col, int *row);
+bool   vte_cursor_visible(const vte_t *vte);
 
 /* Read a cell from the current screen (1-based col/row).
  * Returns false if out of range. */

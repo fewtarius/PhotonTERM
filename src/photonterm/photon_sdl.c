@@ -133,6 +133,7 @@ struct photon_sdl {
     SDL_Window   *win;
     SDL_Renderer *ren;
     TTF_Font     *font;
+    TTF_Font     *emoji_font; /* fallback for emoji/symbol glyphs */
     SDL_Texture  *texture;   /* full-screen streaming texture */
     /* CP437 bitmap glyph atlas: 16x16 grid of 8xFH glyphs, white on black.
      * SDL_TEXTUREACCESS_STATIC, SDL_PIXELFORMAT_RGBA8888.
@@ -410,7 +411,36 @@ photon_sdl_t *photon_sdl_create(const char *title,
     ctx->win    = win;
     ctx->ren    = ren;
     ctx->font   = font;
+    ctx->emoji_font = NULL;
     ctx->texture = tex;
+
+    /* Try to load a system emoji/symbol fallback font */
+    {
+        static const char *emoji_paths[] = {
+#ifdef __APPLE__
+            "/System/Library/Fonts/Apple Color Emoji.ttc",
+            "/System/Library/Fonts/AppleColorEmoji.ttc",
+#elif defined(_WIN32)
+            "C:\\Windows\\Fonts\\seguiemj.ttf",
+            "C:\\Windows\\Fonts\\segoeui.ttf",
+#else
+            "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
+            "/usr/share/fonts/noto-emoji/NotoColorEmoji.ttf",
+            "/usr/share/fonts/google-noto-emoji/NotoColorEmoji.ttf",
+            "/usr/share/fonts/truetype/noto/NotoEmoji-Regular.ttf",
+#endif
+            NULL
+        };
+        for (int i = 0; emoji_paths[i]; i++) {
+            if (font_accessible(emoji_paths[i])) {
+                ctx->emoji_font = TTF_OpenFont(emoji_paths[i], font_pt);
+                if (ctx->emoji_font) {
+                    PHOTON_DBG("loaded emoji fallback font: %s", emoji_paths[i]);
+                    break;
+                }
+            }
+        }
+    }
     ctx->cols   = cols;
     ctx->rows   = rows;
     ctx->cell_w = cell_w;
@@ -489,6 +519,7 @@ void photon_sdl_free(photon_sdl_t *ctx)
     if (ctx->ren)     SDL_DestroyRenderer(ctx->ren);
     if (ctx->win)     SDL_DestroyWindow(ctx->win);
     if (ctx->font)    TTF_CloseFont(ctx->font);
+    if (ctx->emoji_font) TTF_CloseFont(ctx->emoji_font);
     free(ctx->shadow);
     free(ctx);
 }
@@ -751,8 +782,14 @@ void photon_sdl_draw_cell(photon_sdl_t *ctx, int col, int row,
         glyph_drawn = true;
     }
     if (!glyph_drawn) {
-        /* TTF fallback */
-        SDL_Surface *surf = TTF_RenderGlyph32_Blended(ctx->font, cp, fg);
+        /* TTF rendering: try primary font, fall back to emoji font */
+        TTF_Font *render_font = ctx->font;
+        if (render_font && !TTF_GlyphIsProvided32(render_font, cp) &&
+            ctx->emoji_font && TTF_GlyphIsProvided32(ctx->emoji_font, cp)) {
+            render_font = ctx->emoji_font;
+        }
+        SDL_Surface *surf = render_font
+            ? TTF_RenderGlyph32_Blended(render_font, cp, fg) : NULL;
         if (surf) {
             SDL_Texture *tex = SDL_CreateTextureFromSurface(ctx->ren, surf);
             SDL_FreeSurface(surf);
@@ -959,8 +996,9 @@ void photon_sdl_repaint(photon_sdl_t *ctx, vte_t *vte)
         }
     }
 
-    /* Draw cursor on top of rendered content */
-    if (ctx->cur_col >= 1 && ctx->cur_row >= 1 &&
+    /* Draw cursor on top of rendered content (respect DECTCEM hide) */
+    if (vte_cursor_visible(vte) &&
+        ctx->cur_col >= 1 && ctx->cur_row >= 1 &&
         ctx->cur_col <= cols && ctx->cur_row <= rows) {
         vte_cell_t under_cell;
         vte_get_cell(vte, ctx->cur_col, ctx->cur_row, &under_cell);

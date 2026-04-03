@@ -43,10 +43,20 @@ int photon_switch_tab_target = 0;
 static photon_session_menu_fn s_session_menu_fn = NULL;
 static void *s_session_menu_userdata = NULL;
 
+/* Render overlay callback (set by host apps for status indicators) */
+static photon_render_overlay_fn s_render_overlay_fn = NULL;
+static void *s_render_overlay_userdata = NULL;
+
 void photon_term_set_session_menu(photon_session_menu_fn fn, void *userdata)
 {
     s_session_menu_fn = fn;
     s_session_menu_userdata = userdata;
+}
+
+void photon_term_set_render_overlay(photon_render_overlay_fn fn, void *userdata)
+{
+    s_render_overlay_fn = fn;
+    s_render_overlay_userdata = userdata;
 }
 
 /* ── Alt-held tab bar overlay ────────────────────────────────────────── */
@@ -871,6 +881,8 @@ photon_term_result_t photon_doterm(vte_t *vte, photon_sdl_t *sdl,
                 photon_sdl_repaint(sdl, vte);
                 if (alt_held && tabbar && tabbar->ntabs > 1)
                     draw_alt_overlay(sdl, tabbar);
+                if (s_render_overlay_fn)
+                    s_render_overlay_fn(sdl, vte, s_render_overlay_userdata);
                 photon_sdl_present(sdl);
                 last_render = t;
                 dirty       = false;
@@ -878,12 +890,8 @@ photon_term_result_t photon_doterm(vte_t *vte, photon_sdl_t *sdl,
         }
 
         /* 6. Short sleep to avoid busy-spin */
-        {
-            /* Sleep only when idle - if we got data, loop immediately */
-            if (!got_data && !dirty) {
-                struct timespec sl = { 0, 2000000L };  /* 2 ms */
-                nanosleep(&sl, NULL);
-            }
+        if (!got_data && !dirty) {
+            SDL_Delay(8);  /* 8ms idle sleep (~125 Hz), portable across platforms */
         }
     }
 

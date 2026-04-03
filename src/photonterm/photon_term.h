@@ -47,6 +47,14 @@ typedef photon_term_result_t (*photon_session_menu_fn)(
  * Pass NULL to restore the default PhotonTERM session menu. */
 void photon_term_set_session_menu(photon_session_menu_fn fn, void *userdata);
 
+/* Render overlay callback - called after terminal repaint, before present.
+ * Host apps use this to draw status indicators, spinners, etc. */
+typedef void (*photon_render_overlay_fn)(photon_sdl_t *sdl, vte_t *vte,
+                                         void *userdata);
+
+/* Set a render overlay callback. Called every frame after terminal renders. */
+void photon_term_set_render_overlay(photon_render_overlay_fn fn, void *userdata);
+
 /* Run one terminal session.
  *
  * vte  - pre-initialised VTE emulator (will receive remote data)

@@ -182,6 +182,7 @@ struct vte {
     /* OSC accumulation buffer */
     char osc_buf[256];
     int  osc_len;
+    bool osc_saw_esc;  /* ESC received inside OSC string, waiting for \ */
 
     /* Parser state machine */
     parser_state_t  state;
@@ -1069,14 +1070,18 @@ static void feed_byte(vte_t *v, uint8_t b)
     case ST_OSC:
         /* First byte enters OSC_STRING, reset accumulation buffer */
         v->osc_len = 0;
+        v->osc_saw_esc = false;
         v->state = ST_OSC_STRING;
         if (b == 0x07) { v->state = ST_GROUND; break; } /* empty OSC + BEL */
         if (b != 0x1B)
             v->osc_buf[v->osc_len++] = (char)b;
+        else
+            v->osc_saw_esc = true;
         break;
     case ST_OSC_STRING:
-        if (b == 0x07 || b == '\\') {
-            /* OSC string complete - fire title callback if appropriate */
+        if (b == 0x07 || (b == '\\' && v->osc_saw_esc)) {
+            /* OSC terminated by BEL or ESC \ (ST) */
+            v->osc_saw_esc = false;
             v->osc_buf[v->osc_len < (int)sizeof(v->osc_buf) ? v->osc_len : (int)sizeof(v->osc_buf) - 1] = '\0';
             /* OSC format: "<code>;<text>" - codes 0 (icon+title) and 2 (title only) */
             if (v->cb.title && v->osc_len > 1) {
@@ -1089,8 +1094,15 @@ static void feed_byte(vte_t *v, uint8_t b)
             }
             v->state = ST_GROUND;
         } else if (b == 0x1B) {
-            /* ESC seen - next byte should be '\' to complete ST, handled above */
+            v->osc_saw_esc = true;
         } else {
+            /* Regular byte - if previous was ESC but this isn't \, store both */
+            if (v->osc_saw_esc) {
+                v->osc_saw_esc = false;
+                /* Stray ESC inside OSC - abort and reprocess */
+                v->state = ST_ESCAPE;
+                break;
+            }
             if (v->osc_len < (int)sizeof(v->osc_buf) - 1)
                 v->osc_buf[v->osc_len++] = (char)b;
         }
@@ -1227,6 +1239,11 @@ void vte_cursor_pos(const vte_t *v, int *col, int *row)
     if (!v) return;
     if (col) *col = v->cx;
     if (row) *row = v->cy;
+}
+
+bool vte_cursor_visible(const vte_t *v)
+{
+    return v ? v->cursor_visible : true;
 }
 
 bool vte_get_cell(const vte_t *v, int col, int row, vte_cell_t *out)
