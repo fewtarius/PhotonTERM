@@ -52,6 +52,8 @@ typedef struct {
     photon_conn_type_t conn_type;
     photon_term_mode_t term_mode;  /* rendering mode override (auto/cp437/utf8) */
     photon_palette_mode_t palette_mode; /* colour palette override */
+    int      init_cols;  /* initial terminal columns (0 = default 80) */
+    int      init_rows;  /* initial terminal rows (0 = default 24) */
 
     time_t   added;
     time_t   last_connected;

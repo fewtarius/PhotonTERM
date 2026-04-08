@@ -6,7 +6,7 @@
  * Network connection layer supporting:
  *   PHOTON_CONN_TELNET  - standard telnet (RFC 854)
  *   PHOTON_CONN_SSH     - SSH via libssh2
- *   PHOTON_CONN_SHELL   - local PTY / shell (POSIX only)
+ *   PHOTON_CONN_SHELL   - local PTY (POSIX) / ConPTY (Windows 10+)
  *
  * Data flow:
  *   Outbound: photon_conn_send() -> output thread -> socket

@@ -1032,6 +1032,17 @@ static bool conn_shell_connect(const photon_bbs_t *bbs)
     strlcpy(slave_name, slave_name_p ? slave_name_p : "", sizeof(slave_name));
 #endif
 
+    /* Set initial PTY size before fork so child inherits correct geometry */
+    int ic = (bbs && bbs->init_cols > 0) ? bbs->init_cols : 80;
+    int ir = (bbs && bbs->init_rows > 0) ? bbs->init_rows : 24;
+    {
+        struct winsize ws;
+        memset(&ws, 0, sizeof(ws));
+        ws.ws_col = (unsigned short)ic;
+        ws.ws_row = (unsigned short)ir;
+        ioctl(master, TIOCSWINSZ, &ws);
+    }
+
     pid_t pid = fork();
     if (pid < 0) { set_error("fork failed"); close(master); return false; }
     if (pid == 0) {
@@ -1054,6 +1065,16 @@ static bool conn_shell_connect(const photon_bbs_t *bbs)
         setenv("TERM", "xterm-256color", 1);
         setenv("COLORTERM", "truecolor", 1);
         setenv("TERM_PROGRAM", "PhotonTERM", 1);
+
+        /* Set LINES/COLUMNS so tools that check env (e.g. Term::ReadKey)
+         * see the correct size even before the first SIGWINCH. */
+        {
+            char buf[16];
+            snprintf(buf, sizeof(buf), "%d", ic);
+            setenv("COLUMNS", buf, 1);
+            snprintf(buf, sizeof(buf), "%d", ir);
+            setenv("LINES", buf, 1);
+        }
         if (bbs && bbs->term_mode == PHOTON_TERM_MODE_CP437) {
             setenv("LANG", "en_US", 1);
         } else {
@@ -1165,8 +1186,10 @@ static bool conn_shell_connect(const photon_bbs_t *bbs)
         return false;
     }
 
-    /* Create pseudo console */
-    COORD size = { 80, 24 };
+    /* Create pseudo console with initial size from caller */
+    int ic = (bbs && bbs->init_cols > 0) ? bbs->init_cols : 80;
+    int ir = (bbs && bbs->init_rows > 0) ? bbs->init_rows : 24;
+    COORD size = { (SHORT)ic, (SHORT)ir };
     HPCON hpc = 0;
     HRESULT hr = CreatePseudoConsole(size, pipe_in_read, pipe_out_write, 0, &hpc);
     if (FAILED(hr)) {
@@ -1211,10 +1234,17 @@ static bool conn_shell_connect(const photon_bbs_t *bbs)
         wcscpy(cmdline, L"cmd.exe");
     }
 
-    /* Set environment: TERM, COLORTERM */
+    /* Set environment: TERM, COLORTERM, LINES, COLUMNS */
     SetEnvironmentVariableA("TERM", "xterm-256color");
     SetEnvironmentVariableA("COLORTERM", "truecolor");
     SetEnvironmentVariableA("TERM_PROGRAM", "PhotonTERM");
+    {
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%d", ic);
+        SetEnvironmentVariableA("COLUMNS", buf);
+        snprintf(buf, sizeof(buf), "%d", ir);
+        SetEnvironmentVariableA("LINES", buf);
+    }
 
     PROCESS_INFORMATION pi;
     memset(&pi, 0, sizeof(pi));
