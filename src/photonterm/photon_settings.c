@@ -205,7 +205,7 @@ void photon_settings_defaults(photon_settings_t *s)
     s->font_height  = 0;  /* auto */
     s->font_mode    = PHOTON_FONT_TTF;
     s->ttf_path[0]  = 0;  /* bundled */
-    s->ttf_size_pt  = 12;
+    s->ttf_size_pt  = 18;
     s->invert_scroll= false;
     s->debug        = false;
     s->bell_enabled = true;
