@@ -441,6 +441,8 @@ photon_sdl_t *photon_sdl_create(const char *title,
     ctx->cell_w = cell_w;
     ctx->cell_h = cell_h;
     ctx->font_pt = (font_pt > 0) ? font_pt : 16;
+    PHOTON_DBG("photon_sdl_create: %dx%d cells, cell=%dx%d, font_pt=%d, win=%dx%d",
+               cols, rows, cell_w, cell_h, ctx->font_pt, win_w, win_h);
     ctx->win_w  = win_w;
     ctx->win_h  = win_h;
     ctx->draw_w = draw_w;
@@ -602,8 +604,24 @@ bool photon_sdl_set_font_size(photon_sdl_t *ctx, int pt,
     if (cell_w < 4) cell_w = 4;
 
     /* New window pixel size - keep same grid dimensions */
-    int new_win_w = ctx->cols * cell_w;
-    int new_win_h = ctx->rows * cell_h;
+    bool is_fullscreen = (SDL_GetWindowFlags(ctx->win) &
+                          (SDL_WINDOW_FULLSCREEN | SDL_WINDOW_FULLSCREEN_DESKTOP)) != 0;
+    int new_win_w, new_win_h;
+    int new_grid_cols, new_grid_rows;
+    if (is_fullscreen) {
+        /* In fullscreen the window size is fixed; derive new grid from it */
+        SDL_GetWindowSize(ctx->win, &new_win_w, &new_win_h);
+        new_grid_cols = new_win_w / cell_w;
+        new_grid_rows = new_win_h / cell_h;
+        if (new_grid_cols < 1) new_grid_cols = 1;
+        if (new_grid_rows < 1) new_grid_rows = 1;
+    } else {
+        /* Windowed: keep same grid, resize window to fit */
+        new_grid_cols = ctx->cols;
+        new_grid_rows = ctx->rows;
+        new_win_w = new_grid_cols * cell_w;
+        new_win_h = new_grid_rows * cell_h;
+    }
 
     /* Replace font, geometry */
     TTF_CloseFont(ctx->font);
@@ -617,9 +635,12 @@ bool photon_sdl_set_font_size(photon_sdl_t *ctx, int pt,
     ctx->win_w  = new_win_w;
     ctx->font_pt = pt;
     ctx->win_h  = new_win_h;
+    ctx->cols   = new_grid_cols;
+    ctx->rows   = new_grid_rows;
 
     /* Resize SDL window */
-    SDL_SetWindowSize(ctx->win, new_win_w, new_win_h);
+    if (!is_fullscreen)
+        SDL_SetWindowSize(ctx->win, new_win_w, new_win_h);
 
     /* Update HiDPI scale (window size changed) */
     int draw_w = new_win_w, draw_h = new_win_h;
@@ -1364,6 +1385,28 @@ static void translate_sdl_event(photon_sdl_t *ctx, const SDL_Event *ev)
         photon_key_t k = { .code = (int)sym, .mod = mod };
         kq_push(&ctx->keys, k);
         return;
+    }
+    /* Cmd+digit or Cmd+punctuation (macOS) - pass to host key hook */
+    if (mod & PHOTON_MOD_META) {
+        if ((sym >= SDLK_0 && sym <= SDLK_9) ||
+             sym == SDLK_EQUALS || sym == SDLK_MINUS ||
+             sym == SDLK_PLUS   || sym == SDLK_KP_PLUS ||
+             sym == SDLK_KP_MINUS || sym == SDLK_KP_EQUALS) {
+            photon_key_t k = { .code = (int)sym, .mod = mod };
+            kq_push(&ctx->keys, k);
+            return;
+        }
+    }
+    /* Ctrl+digit or Ctrl+punctuation - pass to host key hook */
+    if (mod & PHOTON_MOD_CTRL) {
+        if ((sym >= SDLK_0 && sym <= SDLK_9) ||
+             sym == SDLK_EQUALS || sym == SDLK_MINUS ||
+             sym == SDLK_PLUS   || sym == SDLK_KP_PLUS ||
+             sym == SDLK_KP_MINUS || sym == SDLK_KP_EQUALS) {
+            photon_key_t k = { .code = (int)sym, .mod = mod };
+            kq_push(&ctx->keys, k);
+            return;
+        }
     }
     /* Other keys (e.g. bare modifiers, media keys) - ignored */
 }
