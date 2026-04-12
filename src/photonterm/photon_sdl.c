@@ -657,6 +657,30 @@ bool photon_sdl_set_font_size(photon_sdl_t *ctx, int pt,
         ctx->texture = make_texture(ctx->ren, new_win_w, new_win_h);
     }
 
+    /* Update shadow buffer dimensions.
+     * Fullscreen: grid may change; windowed: grid stays same as ctx->cols/rows. */
+    if (is_fullscreen) {
+        ctx->shadow_cols = new_grid_cols;
+        ctx->shadow_rows = new_grid_rows;
+    } else {
+        ctx->shadow_cols = new_grid_cols;
+        ctx->shadow_rows = new_grid_rows;
+    }
+
+    /* Clear shadow buffer so expose events trigger full repaint, not stale cache.
+     * This fixes display issues on Windows/Linux where SDL doesn't auto-expose
+     * the window after a programmatic resize. */
+    if (ctx->shadow && new_grid_cols > 0 && new_grid_rows > 0) {
+        size_t shadow_n = (size_t)new_grid_cols * (size_t)new_grid_rows;
+        void *p = realloc(ctx->shadow, shadow_n * sizeof(vte_cell_t));
+        if (p) {
+            ctx->shadow = p;
+            memset(ctx->shadow, 0, shadow_n * sizeof(vte_cell_t));
+        }
+    }
+
+    SDL_RenderPresent(ctx->ren);
+
     PHOTON_DBG("set_font_size: %dpt -> cell %dx%d, win %dx%d",
                pt, cell_w, cell_h, new_win_w, new_win_h);
 
