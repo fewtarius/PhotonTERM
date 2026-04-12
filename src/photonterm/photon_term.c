@@ -47,6 +47,10 @@ static void *s_session_menu_userdata = NULL;
 static photon_render_overlay_fn s_render_overlay_fn = NULL;
 static void *s_render_overlay_userdata = NULL;
 
+/* Key hook callback (set by host apps to intercept keys before processing) */
+static photon_key_hook_fn s_key_hook_fn = NULL;
+static void *s_key_hook_userdata = NULL;
+
 void photon_term_set_session_menu(photon_session_menu_fn fn, void *userdata)
 {
     s_session_menu_fn = fn;
@@ -57,6 +61,12 @@ void photon_term_set_render_overlay(photon_render_overlay_fn fn, void *userdata)
 {
     s_render_overlay_fn = fn;
     s_render_overlay_userdata = userdata;
+}
+
+void photon_term_set_key_hook(photon_key_hook_fn fn, void *userdata)
+{
+    s_key_hook_fn = fn;
+    s_key_hook_userdata = userdata;
 }
 
 /* ── Alt-held tab bar overlay ────────────────────────────────────────── */
@@ -730,6 +740,13 @@ photon_term_result_t photon_doterm(vte_t *vte, photon_sdl_t *sdl,
         {
             photon_key_t k;
             while (!done && photon_sdl_poll_key(sdl, &k)) {
+                /* Key hook: let host app intercept before we process */
+                if (s_key_hook_fn &&
+                    s_key_hook_fn(&k, sdl, settings, s_key_hook_userdata)) {
+                    dirty = true;
+                    continue;
+                }
+
                 /* Window close button */
                 if (k.code == PHOTON_KEY_QUIT) {
                     result = PHOTON_TERM_QUIT;

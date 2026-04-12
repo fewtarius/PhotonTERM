@@ -548,6 +548,114 @@ bool photon_sdl_get_ttf_mode(const photon_sdl_t *ctx)
     return ctx ? ctx->use_ttf : false;
 }
 
+/* ── Live font-size change ──────────────────────────────────────────── */
+
+/* Reload the TTF font at a new point size, recompute cell geometry,
+ * resize the SDL window to maintain the same terminal grid (cols x rows),
+ * and return the new terminal dimensions via *new_cols / *new_rows.
+ * Pass NULL for new_cols/new_rows if you don't need them back.
+ * Returns true on success, false if the font could not be reloaded. */
+bool photon_sdl_set_font_size(photon_sdl_t *ctx, int pt,
+                              int *new_cols, int *new_rows)
+{
+    if (!ctx || pt <= 0) return false;
+
+    /* Load replacement TTF font from embedded Terminus data */
+    TTF_Font *new_font = NULL;
+    if (photon_terminus_ttf && photon_terminus_ttf_size > 0) {
+        SDL_RWops *rw = SDL_RWFromConstMem(photon_terminus_ttf,
+                                           (int)photon_terminus_ttf_size);
+        if (rw) new_font = TTF_OpenFontRW(rw, 1, pt);
+    }
+    if (!new_font) {
+        PHOTON_DBG("set_font_size: failed to reload TTF at %dpt", pt);
+        return false;
+    }
+    TTF_SetFontHinting(new_font, TTF_HINTING_LIGHT);
+
+    /* Optionally reload emoji fallback font at new size */
+    TTF_Font *new_emoji = NULL;
+    if (ctx->emoji_font) {
+        static const char *emoji_paths[] = {
+#ifdef __APPLE__
+            "/System/Library/Fonts/Apple Color Emoji.ttc",
+            "/System/Library/Fonts/AppleColorEmoji.ttc",
+#elif defined(_WIN32)
+            "C:\\Windows\\Fonts\\seguiemj.ttf",
+            "C:\\Windows\\Fonts\\segoeui.ttf",
+#else
+            "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
+            "/usr/share/fonts/noto-emoji/NotoColorEmoji.ttf",
+            "/usr/share/fonts/google-noto-emoji/NotoColorEmoji.ttf",
+            "/usr/share/fonts/truetype/noto/NotoEmoji-Regular.ttf",
+#endif
+            NULL
+        };
+        for (int i = 0; emoji_paths[i]; i++) {
+            if (font_accessible(emoji_paths[i])) {
+                new_emoji = TTF_OpenFont(emoji_paths[i], pt);
+                if (new_emoji) break;
+            }
+        }
+    }
+
+    /* Recompute cell geometry (same logic as photon_sdl_create) */
+    int cell_h = pt;
+    {
+        int scale = cell_h / 16;
+        if (scale < 1) scale = 1;
+        cell_h = scale * 16;
+    }
+    int cell_w = cell_h / 2;
+    if (cell_w < 8) cell_w = 8;
+
+    /* New window pixel size - keep same grid dimensions */
+    int new_win_w = ctx->cols * cell_w;
+    int new_win_h = ctx->rows * cell_h;
+
+    /* Replace font, geometry */
+    TTF_CloseFont(ctx->font);
+    ctx->font   = new_font;
+    if (new_emoji) {
+        if (ctx->emoji_font) TTF_CloseFont(ctx->emoji_font);
+        ctx->emoji_font = new_emoji;
+    }
+    ctx->cell_w = cell_w;
+    ctx->cell_h = cell_h;
+    ctx->win_w  = new_win_w;
+    ctx->win_h  = new_win_h;
+
+    /* Resize SDL window */
+    SDL_SetWindowSize(ctx->win, new_win_w, new_win_h);
+
+    /* Update HiDPI scale (window size changed) */
+    int draw_w = new_win_w, draw_h = new_win_h;
+    SDL_GetRendererOutputSize(ctx->ren, &draw_w, &draw_h);
+    ctx->draw_w = draw_w;
+    ctx->draw_h = draw_h;
+    ctx->retina_scale = (draw_w > 0 && new_win_w > 0)
+                        ? (float)draw_w / (float)new_win_w : 1.0f;
+    SDL_RenderSetScale(ctx->ren, ctx->retina_scale, ctx->retina_scale);
+
+    /* Rebuild texture to match new window size */
+    if (ctx->texture) {
+        SDL_DestroyTexture(ctx->texture);
+        ctx->texture = make_texture(ctx->ren, new_win_w, new_win_h);
+    }
+
+    PHOTON_DBG("set_font_size: %dpt -> cell %dx%d, win %dx%d",
+               pt, cell_w, cell_h, new_win_w, new_win_h);
+
+    if (new_cols) *new_cols = ctx->cols;
+    if (new_rows) *new_rows = ctx->rows;
+    return true;
+}
+
+int photon_sdl_get_font_size(const photon_sdl_t *ctx)
+{
+    return ctx ? ctx->cell_h : 0;
+}
+
 void photon_sdl_save_palette(const photon_sdl_t *ctx, uint8_t buf[768])
 {
     if (!ctx || !buf) return;

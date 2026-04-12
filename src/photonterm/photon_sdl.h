@@ -202,6 +202,17 @@ void photon_sdl_load_cga_palette(photon_sdl_t *ctx);
 void photon_sdl_set_ttf_mode(photon_sdl_t *ctx, bool enable);
 bool photon_sdl_get_ttf_mode(const photon_sdl_t *ctx);
 
+/* Live font-size adjustment.  Reloads the TTF font at pt points, recomputes
+ * cell geometry, and resizes the SDL window while keeping the same grid.
+ * Returns true on success.  Call vte_resize() + photon_conn_resize() after
+ * this to inform the child process of the new terminal dimensions.
+ * new_cols / new_rows are set to the (unchanged) grid size on success. */
+bool photon_sdl_set_font_size(photon_sdl_t *ctx, int pt,
+                              int *new_cols, int *new_rows);
+
+/* Return the current cell height (== effective font pt size). */
+int photon_sdl_get_font_size(const photon_sdl_t *ctx);
+
 /* Save/restore the full 256-entry palette.  buf must be 768 bytes. */
 void photon_sdl_save_palette(const photon_sdl_t *ctx, uint8_t buf[768]);
 void photon_sdl_restore_palette(photon_sdl_t *ctx, const uint8_t buf[768]);

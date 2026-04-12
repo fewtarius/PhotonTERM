@@ -55,6 +55,18 @@ typedef void (*photon_render_overlay_fn)(photon_sdl_t *sdl, vte_t *vte,
 /* Set a render overlay callback. Called every frame after terminal renders. */
 void photon_term_set_render_overlay(photon_render_overlay_fn fn, void *userdata);
 
+/* Key hook callback type.
+ * Called for every key event before PhotonTERM processes it.
+ * Return true to consume the key (PhotonTERM will not process it further).
+ * Return false to let PhotonTERM handle it normally. */
+typedef bool (*photon_key_hook_fn)(const photon_key_t *key,
+                                   photon_sdl_t *sdl,
+                                   photon_settings_t *settings,
+                                   void *userdata);
+
+/* Set a key hook callback. Pass NULL to clear. */
+void photon_term_set_key_hook(photon_key_hook_fn fn, void *userdata);
+
 /* Run one terminal session.
  *
  * vte  - pre-initialised VTE emulator (will receive remote data)
