@@ -143,6 +143,7 @@ struct photon_sdl {
 
     int           cols, rows;
     int           cell_w, cell_h;
+    int           font_pt;        /* TTF point size currently in use */
     int           win_w, win_h;
     int           draw_w, draw_h; /* physical drawable pixels (Retina 2x etc.) */
     float         retina_scale;   /* draw_w / win_w; typically 1.0 or 2.0 */
@@ -337,18 +338,12 @@ photon_sdl_t *photon_sdl_create(const char *title,
     }
     TTF_SetFontHinting(font, TTF_HINTING_LIGHT);
 
-    /* Cell size: based on the CP437 bitmap font (8 wide, 16 tall) scaled.
-     * font_pt acts as the desired cell pixel height; we compute integer
-     * scale so the bitmap font fits cleanly (nearest multiple of 16). */
+    /* Cell size: cell_h matches the requested font point size directly.
+     * The CP437 bitmap atlas (8x16) is scaled to fit via SDL_RenderCopy. */
     int cell_h = (font_pt > 0) ? font_pt : 16;
-    /* Round cell_h to a multiple of 16 for clean bitmap scaling */
-    {
-        int scale = cell_h / 16;
-        if (scale < 1) scale = 1;
-        cell_h = scale * 16;
-    }
-    int cell_w = cell_h / 2;   /* 8:16 = 1:2 aspect ratio */
-    if (cell_w < 8) cell_w = 8;
+    if (cell_h < 8) cell_h = 8;
+    int cell_w = (cell_h + 1) / 2;  /* ~0.5 aspect ratio, rounded up */
+    if (cell_w < 4) cell_w = 4;
 
     int win_w = cols * cell_w;
     int win_h = rows * cell_h;
@@ -445,6 +440,7 @@ photon_sdl_t *photon_sdl_create(const char *title,
     ctx->rows   = rows;
     ctx->cell_w = cell_w;
     ctx->cell_h = cell_h;
+    ctx->font_pt = (font_pt > 0) ? font_pt : 16;
     ctx->win_w  = win_w;
     ctx->win_h  = win_h;
     ctx->draw_w = draw_w;
@@ -601,13 +597,9 @@ bool photon_sdl_set_font_size(photon_sdl_t *ctx, int pt,
 
     /* Recompute cell geometry (same logic as photon_sdl_create) */
     int cell_h = pt;
-    {
-        int scale = cell_h / 16;
-        if (scale < 1) scale = 1;
-        cell_h = scale * 16;
-    }
-    int cell_w = cell_h / 2;
-    if (cell_w < 8) cell_w = 8;
+    if (cell_h < 8) cell_h = 8;
+    int cell_w = (cell_h + 1) / 2;
+    if (cell_w < 4) cell_w = 4;
 
     /* New window pixel size - keep same grid dimensions */
     int new_win_w = ctx->cols * cell_w;
@@ -623,6 +615,7 @@ bool photon_sdl_set_font_size(photon_sdl_t *ctx, int pt,
     ctx->cell_w = cell_w;
     ctx->cell_h = cell_h;
     ctx->win_w  = new_win_w;
+    ctx->font_pt = pt;
     ctx->win_h  = new_win_h;
 
     /* Resize SDL window */
@@ -653,7 +646,7 @@ bool photon_sdl_set_font_size(photon_sdl_t *ctx, int pt,
 
 int photon_sdl_get_font_size(const photon_sdl_t *ctx)
 {
-    return ctx ? ctx->cell_h : 0;
+    return ctx ? ctx->font_pt : 0;
 }
 
 void photon_sdl_save_palette(const photon_sdl_t *ctx, uint8_t buf[768])
