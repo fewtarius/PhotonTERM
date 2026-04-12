@@ -82,6 +82,20 @@ void photon_ui_set_colors(photon_ui_t *ui, const photon_ui_colors_t *c)
     if (ui && c) ui->colors = *c;
 }
 
+/* ── Grid dimension helpers ────────────────────────────────────────────── */
+
+/* Grid dimensions: prefer SDL (live, reflects fullscreen) over VTE */
+static int ui_grid_cols(const photon_ui_t *ui)
+{
+    return (ui->sdl && photon_sdl_cols(ui->sdl) > 0)
+           ? photon_sdl_cols(ui->sdl) : vte_cols(ui->vte);
+}
+static int ui_grid_rows(const photon_ui_t *ui)
+{
+    return (ui->sdl && photon_sdl_rows(ui->sdl) > 0)
+           ? photon_sdl_rows(ui->sdl) : vte_rows(ui->vte);
+}
+
 /* ── Screen save / restore ─────────────────────────────────────────────── */
 
 photon_ui_screen_t *photon_ui_save_screen(photon_ui_t *ui)
@@ -107,8 +121,8 @@ photon_ui_screen_t *photon_ui_save_screen(photon_ui_t *ui)
 void photon_ui_restore_screen(photon_ui_t *ui, photon_ui_screen_t *s)
 {
     if (!ui || !s) return;
-    int cols = s->cols < vte_cols(ui->vte) ? s->cols : vte_cols(ui->vte);
-    int rows = s->rows < vte_rows(ui->vte) ? s->rows : vte_rows(ui->vte);
+    int cols = s->cols < ui_grid_cols(ui) ? s->cols : ui_grid_cols(ui);
+    int rows = s->rows < ui_grid_rows(ui) ? s->rows : ui_grid_rows(ui);
     for (int r = 1; r <= rows; r++) {
         for (int c = 1; c <= cols; c++) {
             const vte_cell_t *cell = &s->cells[(r-1)*s->cols + (c-1)];
@@ -235,8 +249,8 @@ static void ui_draw_box(photon_ui_t *ui,
 static void center_box(photon_ui_t *ui, int box_w, int box_h,
                        int *out_col1, int *out_row1)
 {
-    int tcols = vte_cols(ui->vte);
-    int trows = vte_rows(ui->vte);
+    int tcols = ui_grid_cols(ui);
+    int trows = ui_grid_rows(ui);
     *out_col1 = (tcols - box_w) / 2 + 1;
     *out_row1 = (trows - box_h) / 2 + 1;
     if (*out_col1 < 1) *out_col1 = 1;
@@ -267,10 +281,10 @@ int photon_ui_list(photon_ui_t *ui,
         if (w > max_item_w) max_item_w = w;
     }
     if (max_item_w < 10) max_item_w = 10;
-    if (max_item_w > vte_cols(ui->vte) - 4) max_item_w = vte_cols(ui->vte) - 4;
+    if (max_item_w > ui_grid_cols(ui) - 4) max_item_w = ui_grid_cols(ui) - 4;
 
     int box_w    = max_item_w + 4;           /* 2 border + 2 padding */
-    int max_vis  = vte_rows(ui->vte) - 6;    /* leave some margin */
+    int max_vis  = ui_grid_rows(ui) - 6;    /* leave some margin */
     if (max_vis < 3) max_vis = 3;
     int vis_rows = n_items < max_vis ? n_items : max_vis;
     int box_h    = vis_rows + 2;             /* +2 for borders */
@@ -406,7 +420,7 @@ int photon_ui_input(photon_ui_t *ui,
 
     int max_field = 40;
     if (max_field > buflen - 1) max_field = buflen - 1;
-    if (max_field > vte_cols(ui->vte) - 8) max_field = vte_cols(ui->vte) - 8;
+    if (max_field > ui_grid_cols(ui) - 8) max_field = ui_grid_cols(ui) - 8;
 
     int box_w = max_field + 4;
     int box_h = 3;
@@ -546,8 +560,8 @@ bool photon_ui_form(photon_ui_t *ui,
     PHOTON_DBG("photon_ui_form: ENTER title='%s' n_fields=%d", title ? title : "(null)", n_fields);
 
     const photon_ui_colors_t *cl = &ui->colors;
-    int vte_cols_n = vte_cols(ui->vte);
-    int vte_rows_n = vte_rows(ui->vte);
+    int vte_cols_n = ui_grid_cols(ui);
+    int vte_rows_n = ui_grid_rows(ui);
 
     /* Layout */
     int label_w = 0;
@@ -812,7 +826,7 @@ void photon_ui_msg(photon_ui_t *ui, const char *message)
     int msg_len = (int)strlen(message);
     int box_w   = msg_len + 4;
     if (box_w < 20) box_w = 20;
-    if (box_w > vte_cols(ui->vte) - 2) box_w = vte_cols(ui->vte) - 2;
+    if (box_w > ui_grid_cols(ui) - 2) box_w = ui_grid_cols(ui) - 2;
 
     int box_h   = 3;
     int col1, row1;
@@ -890,8 +904,8 @@ void photon_ui_showbuf(photon_ui_t *ui,
     if (!ui || !text) return;
     if (max_cols <= 0) max_cols = 78;
     if (max_rows <= 0) max_rows = 20;
-    if (max_cols > vte_cols(ui->vte) - 2) max_cols = vte_cols(ui->vte) - 2;
-    if (max_rows > vte_rows(ui->vte) - 2) max_rows = vte_rows(ui->vte) - 2;
+    if (max_cols > ui_grid_cols(ui) - 2) max_cols = ui_grid_cols(ui) - 2;
+    if (max_rows > ui_grid_rows(ui) - 2) max_rows = ui_grid_rows(ui) - 2;
 
     char **lines = NULL;
     int   n_lines = split_lines(text, &lines);
@@ -1036,10 +1050,10 @@ void photon_ui_pop(photon_ui_t *ui, const char *msg)
     if (msg_len > TOAST_MAX - 1) msg_len = TOAST_MAX - 1;
 
     int toast_w = msg_len + 6;  /* "[ msg ]" */
-    if (toast_w > vte_cols(ui->vte)) toast_w = vte_cols(ui->vte);
+    if (toast_w > ui_grid_cols(ui)) toast_w = ui_grid_cols(ui);
 
-    int tcols = vte_cols(ui->vte);
-    int trows = vte_rows(ui->vte);
+    int tcols = ui_grid_cols(ui);
+    int trows = ui_grid_rows(ui);
 
     int col1 = (tcols - toast_w) / 2 + 1;
     int row1 = trows / 2;

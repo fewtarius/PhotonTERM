@@ -1316,6 +1316,25 @@ static void translate_sdl_event(photon_sdl_t *ctx, const SDL_Event *ev)
             SDL_SetWindowFullscreen(ctx->win, 0);
         else
             SDL_SetWindowFullscreen(ctx->win, SDL_WINDOW_FULLSCREEN_DESKTOP);
+        /* Force immediate resize processing so ui_grid_cols/rows reflect the
+         * new fullscreen grid on the very next frame. */
+        int w, h;
+        SDL_GetWindowSize(ctx->win, &w, &h);
+        ctx->win_w = w;
+        ctx->win_h = h;
+        if (ctx->cell_w > 0 && ctx->cell_h > 0) {
+            int nc = w / ctx->cell_w;
+            int nr = h / ctx->cell_h;
+            if (nc < 1) nc = 1;
+            if (nr < 1) nr = 1;
+            ctx->cols = nc;
+            ctx->rows = nr;
+            ctx->shadow = realloc(ctx->shadow, (size_t)(nc * nr) * sizeof(vte_cell_t));
+            ctx->shadow_cols = nc;
+            ctx->shadow_rows = nr;
+            for (int i = 0; i < nc * nr; i++) ctx->shadow[i] = (vte_cell_t){0};
+        }
+        ctx->resize_pending = false;
         return;
     }
 
@@ -1494,8 +1513,20 @@ bool photon_sdl_take_expose(photon_sdl_t *ctx)
 
 /* ── Grid info ──────────────────────────────────────────────────────── */
 
-int photon_sdl_cols(const photon_sdl_t *ctx)      { return ctx ? ctx->cols : 0; }
-int photon_sdl_rows(const photon_sdl_t *ctx)      { return ctx ? ctx->rows : 0; }
+/* Return pending grid dimensions when a resize is queued but not yet consumed.
+ * This lets photon_ui layout code see the new grid immediately. */
+int photon_sdl_cols(const photon_sdl_t *ctx)
+{
+    if (!ctx) return 0;
+    return (ctx->resize_pending && ctx->pending_cols > 0)
+           ? ctx->pending_cols : ctx->cols;
+}
+int photon_sdl_rows(const photon_sdl_t *ctx)
+{
+    if (!ctx) return 0;
+    return (ctx->resize_pending && ctx->pending_rows > 0)
+           ? ctx->pending_rows : ctx->rows;
+}
 int photon_sdl_cell_width(const photon_sdl_t *ctx) { return ctx ? ctx->cell_w : 0; }
 int photon_sdl_cell_height(const photon_sdl_t *ctx){ return ctx ? ctx->cell_h : 0; }
 

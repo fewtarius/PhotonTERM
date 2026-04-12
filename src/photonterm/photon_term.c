@@ -732,6 +732,10 @@ photon_term_result_t photon_doterm(vte_t *vte, photon_sdl_t *sdl,
                 PHOTON_DBG("photon_doterm: window resize -> %dx%d", nc, nr);
                 vte_resize(vte, nc, nr);
                 photon_conn_resize(nc, nr);
+                /* Also resize the UI VTE so menus re-center on the new grid */
+                vte_t *ui_vte = photon_ui_vte(ui);
+                if (ui_vte && ui_vte != vte)
+                    vte_resize(ui_vte, nc, nr);
                 dirty = true;
             }
         }
