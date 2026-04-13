@@ -331,7 +331,11 @@ static session_menu_result_t show_session_menu(photon_ui_t *ui,
 
     photon_menu_list_state_t state = { .cursor = 0, .scroll = 0 };
 
+    bool redraw = true;
+    int visible = 0;
+
     for (;;) {
+        if (redraw) {
         photon_menu_list_t menu = {
             .title       = title,
             .items       = labels,
@@ -344,23 +348,33 @@ static session_menu_result_t show_session_menu(photon_ui_t *ui,
             .draw_header = NULL,
         };
 
-        int visible = photon_menu_draw_list(ui, &menu, &state);
+        visible = photon_menu_draw_list(ui, &menu, &state);
         photon_sdl_present(sdl);
+        redraw = false;
+        }
 
         photon_key_t key = {0};
-        if (!photon_sdl_wait_key(sdl, &key, 100)) continue;
+        if (!photon_sdl_wait_key(sdl, &key, 100)) {
+            if (photon_sdl_take_expose(sdl))
+                redraw = true;
+            continue;
+        }
         if (key.code == 0) continue;
 
         if (key.code == '\x1b' || key.code == PHOTON_KEY_QUIT) {
+            photon_sdl_invalidate(sdl);
             photon_sdl_repaint(sdl, vte);
             photon_sdl_present(sdl);
             return SESSION_MENU_NONE;
         }
 
-        if (photon_menu_list_handle_nav(&key, &state, nitems, visible))
+        if (photon_menu_list_handle_nav(&key, &state, nitems, visible)) {
+            redraw = true;
             continue;
+        }
 
         if (key.code == '\r' || key.code == ' ') {
+            photon_sdl_invalidate(sdl);
             photon_sdl_repaint(sdl, vte);
             photon_sdl_present(sdl);
             return (session_menu_result_t)state.cursor;
@@ -816,14 +830,17 @@ photon_term_result_t photon_doterm(vte_t *vte, photon_sdl_t *sdl,
                                 /* Re-apply theme in case user changed it */
                                 photon_theme_apply(photon_active_theme, sdl, settings);
                             }
+                            photon_sdl_invalidate(sdl);
                             dirty = true;
                             break;
                         case SESSION_MENU_XFER:
                             photon_xfer_run(photon_conn_get_active(), sdl, ui);
+                            photon_sdl_invalidate(sdl);
                             photon_sdl_repaint(sdl, vte);
                             dirty = true;
                             break;
                         default:
+                            photon_sdl_invalidate(sdl);
                             dirty = true;   /* menu closed, repaint terminal */
                             break;
                     }
@@ -895,10 +912,12 @@ photon_term_result_t photon_doterm(vte_t *vte, photon_sdl_t *sdl,
             bool sel_live = photon_sdl_sel_active(sdl);
             bool alt_held = (SDL_GetModState() & (KMOD_LALT | KMOD_RALT)) != 0;
 
-            /* Render whenever dirty (including mid-stream data) or on frame timer.
-             * got_data means we hit the drain deadline - render now so the user
-             * sees incremental progress, then loop to drain more. */
-            if (dirty || got_data || sel_live || (t - last_render) >= FRAME_MS) {
+            /* Render when content actually changed, or when the mouse
+             * selection is being dragged (needs continuous update).
+             * Safety-net refresh every 500ms handles edge cases (window
+             * expose without SDL event, etc.) while staying idle-friendly
+             * on low-spec hardware (e.g. 8th-gen Intel iGPU). */
+            if (dirty || got_data || sel_live || (t - last_render) >= 500) {
                 photon_sdl_repaint(sdl, vte);
                 if (alt_held && tabbar && tabbar->ntabs > 1)
                     draw_alt_overlay(sdl, tabbar);
@@ -917,6 +936,7 @@ photon_term_result_t photon_doterm(vte_t *vte, photon_sdl_t *sdl,
     }
 
     /* Final repaint before returning */
+    photon_sdl_invalidate(sdl);
     photon_sdl_repaint(sdl, vte);
     photon_sdl_present(sdl);
 

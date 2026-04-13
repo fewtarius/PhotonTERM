@@ -108,6 +108,11 @@ void photon_sdl_reset_to_ansi_palette(struct photon_sdl *sdl);
 /* Deprecated alias for photon_sdl_reset_to_ansi_palette(). */
 void photon_sdl_reset_to_cga_palette(struct photon_sdl *sdl);
 
+/* Temporarily push the active theme palette to SDL (saving old palette to buf).
+ * Use photon_theme_pop_palette() to restore.  buf must be at least 768 bytes. */
+void photon_theme_push_palette(struct photon_sdl *sdl, uint8_t saved[768]);
+void photon_theme_pop_palette(struct photon_sdl *sdl, const uint8_t saved[768]);
+
 /* Apply palette to sdl based on mode + conn_type (for AUTO resolution).
  * Equivalent to calling photon_sdl_load_ansi_palette or photon_sdl_load_xterm_palette. */
 void photon_sdl_apply_palette_mode(struct photon_sdl *sdl,

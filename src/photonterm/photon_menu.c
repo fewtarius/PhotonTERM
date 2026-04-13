@@ -73,9 +73,9 @@ int photon_menu_put_str(photon_ui_t *ui, int col, int row,
 void photon_menu_fill_rect(photon_ui_t *ui,
                            int c1, int r1, int c2, int r2, uint8_t attr)
 {
-	for (int r = r1; r <= r2; r++)
-		for (int c = c1; c <= c2; c++)
-			photon_menu_put_cell(ui, c, r, ' ', attr);
+	uint8_t fg = attr & 0x0f;
+	uint8_t bg = (attr >> 4) & 0x0f;
+	photon_sdl_fill_rect(photon_ui_sdl(ui), c1, r1, c2, r2, fg, bg);
 }
 
 void photon_menu_put_padded(photon_ui_t *ui, int col, int row,

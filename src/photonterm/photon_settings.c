@@ -178,6 +178,32 @@ void photon_sdl_reset_to_cga_palette(struct photon_sdl *sdl)
     photon_sdl_reset_to_ansi_palette(sdl);
 }
 
+void photon_theme_push_palette(struct photon_sdl *sdl, uint8_t saved[768])
+{
+    if (!sdl) return;
+    photon_sdl_save_palette(sdl, saved);
+
+    int idx = photon_active_theme;
+    if (idx < 0) idx = 0;
+    int n = 0;
+    while (photon_themes[n].name) n++;
+    if (idx >= n) idx = 0;
+    const photon_theme_t *t = &photon_themes[idx];
+    for (int i = 0; i < 16; i++) {
+        uint32_t rgb = t->rgb[i] ? t->rgb[i] : ansi_sgr_rgb[i];
+        photon_sdl_set_palette(sdl, i,
+                               (rgb >> 16) & 0xff,
+                               (rgb >>  8) & 0xff,
+                               (rgb      ) & 0xff);
+    }
+}
+
+void photon_theme_pop_palette(struct photon_sdl *sdl, const uint8_t saved[768])
+{
+    if (!sdl) return;
+    photon_sdl_restore_palette(sdl, saved);
+}
+
 void photon_sdl_apply_palette_mode(struct photon_sdl *sdl,
                                    photon_palette_mode_t mode,
                                    photon_conn_type_t    conn_type)

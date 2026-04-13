@@ -127,6 +127,102 @@ static bool kq_peek(const key_queue_t *q)
     return q->count > 0;
 }
 
+/* ── TTF glyph texture cache ────────────────────────────────────────── */
+
+/* Open-addressing hash table: key = (codepoint, fg_r, fg_g, fg_b),
+ * value = SDL_Texture* + glyph metrics.  Evicted on font/palette change. */
+
+#define GLYPH_CACHE_BITS  12                       /* 4096 slots */
+#define GLYPH_CACHE_SIZE  (1 << GLYPH_CACHE_BITS)
+#define GLYPH_CACHE_MASK  (GLYPH_CACHE_SIZE - 1)
+
+typedef struct {
+    uint32_t     key;       /* packed: codepoint XOR'd with fg color */
+    uint32_t     cp;        /* original codepoint (for collision check) */
+    uint8_t      fg_r, fg_g, fg_b;
+    bool         occupied;
+    SDL_Texture *tex;
+    int          gw, gh;    /* glyph pixel dimensions */
+} glyph_cache_entry_t;
+
+typedef struct {
+    glyph_cache_entry_t slots[GLYPH_CACHE_SIZE];
+    int count;
+} glyph_cache_t;
+
+static uint32_t glyph_cache_hash(uint32_t cp, uint8_t r, uint8_t g, uint8_t b)
+{
+    /* FNV-1a inspired mix */
+    uint32_t h = 2166136261u;
+    h ^= cp;        h *= 16777619u;
+    h ^= r;         h *= 16777619u;
+    h ^= (uint32_t)g << 8;  h *= 16777619u;
+    h ^= (uint32_t)b << 16; h *= 16777619u;
+    return h;
+}
+
+static SDL_Texture *glyph_cache_get(glyph_cache_t *gc, uint32_t cp,
+                                     uint8_t r, uint8_t g, uint8_t b,
+                                     int *gw, int *gh)
+{
+    uint32_t h = glyph_cache_hash(cp, r, g, b);
+    for (int i = 0; i < 8; i++) {  /* max 8 probes */
+        uint32_t idx = (h + (uint32_t)i) & GLYPH_CACHE_MASK;
+        glyph_cache_entry_t *e = &gc->slots[idx];
+        if (!e->occupied) return NULL;
+        if (e->cp == cp && e->fg_r == r && e->fg_g == g && e->fg_b == b) {
+            *gw = e->gw;
+            *gh = e->gh;
+            return e->tex;
+        }
+    }
+    return NULL;
+}
+
+static void glyph_cache_put(glyph_cache_t *gc, uint32_t cp,
+                              uint8_t r, uint8_t g, uint8_t b,
+                              SDL_Texture *tex, int gw, int gh)
+{
+    /* If cache is > 75% full, don't insert (evict on next clear) */
+    if (gc->count > GLYPH_CACHE_SIZE * 3 / 4) return;
+
+    uint32_t h = glyph_cache_hash(cp, r, g, b);
+    for (int i = 0; i < 8; i++) {
+        uint32_t idx = (h + (uint32_t)i) & GLYPH_CACHE_MASK;
+        glyph_cache_entry_t *e = &gc->slots[idx];
+        if (!e->occupied) {
+            e->cp = cp;
+            e->fg_r = r;  e->fg_g = g;  e->fg_b = b;
+            e->tex = tex;
+            e->gw = gw;   e->gh = gh;
+            e->occupied = true;
+            e->key = h;
+            gc->count++;
+            return;
+        }
+        /* Already cached? Update texture. */
+        if (e->cp == cp && e->fg_r == r && e->fg_g == g && e->fg_b == b) {
+            if (e->tex) SDL_DestroyTexture(e->tex);
+            e->tex = tex;
+            e->gw = gw;  e->gh = gh;
+            return;
+        }
+    }
+    /* All probe slots occupied; drop this glyph (will retry after eviction) */
+    SDL_DestroyTexture(tex);
+}
+
+static void glyph_cache_clear(glyph_cache_t *gc)
+{
+    for (int i = 0; i < GLYPH_CACHE_SIZE; i++) {
+        if (gc->slots[i].occupied && gc->slots[i].tex)
+            SDL_DestroyTexture(gc->slots[i].tex);
+        gc->slots[i].occupied = false;
+        gc->slots[i].tex = NULL;
+    }
+    gc->count = 0;
+}
+
 /* ── Context struct ─────────────────────────────────────────────────── */
 
 struct photon_sdl {
@@ -168,6 +264,7 @@ struct photon_sdl {
     vte_cell_t   *shadow;       /* heap: cols*rows, or NULL */
     int           shadow_cols;  /* dimensions when shadow was allocated */
     int           shadow_rows;
+    bool          pal_dirty;    /* palette changed: shadow indices are stale */
 
     /* Pending window-driven resize.  Set by the SDL event handler when the
      * user drags the window to a new size; consumed by photon_sdl_check_resize().
@@ -188,6 +285,9 @@ struct photon_sdl {
     bool          sel_have;     /* selection exists */
     int           sel_start_col, sel_start_row;
     int           sel_end_col,   sel_end_row;
+
+    /* TTF glyph texture cache (heap-allocated, ~200KB) */
+    glyph_cache_t *glyph_cache;
 };
 
 /* ── Static error buffer ────────────────────────────────────────────── */
@@ -210,7 +310,7 @@ static SDL_Texture *make_texture(SDL_Renderer *ren, int w, int h)
 {
     SDL_Texture *t = SDL_CreateTexture(ren,
         SDL_PIXELFORMAT_ARGB8888,
-        SDL_TEXTUREACCESS_STREAMING,
+        SDL_TEXTUREACCESS_TARGET,
         w, h);
     return t;
 }
@@ -316,7 +416,7 @@ photon_sdl_t *photon_sdl_create(const char *title,
                      "TTF_OpenFont(%s, %d): %s", font_path, font_pt, TTF_GetError());
             return NULL;
         }
-    } else if (photon_terminus_ttf && photon_terminus_ttf_size > 0) {
+    } else if (photon_terminus_ttf_size > 0) {
         /* Use embedded Terminus TTF */
         SDL_RWops *rw = SDL_RWFromConstMem(photon_terminus_ttf,
                                            (int)photon_terminus_ttf_size);
@@ -501,10 +601,26 @@ photon_sdl_t *photon_sdl_create(const char *title,
     /* Load ANSI SGR 16-colour palette (0-15); indices 16-255 left zero */
     init_ansi_sgr_16(ctx->pal);
 
+    /* Allocate TTF glyph texture cache */
+    ctx->glyph_cache = calloc(1, sizeof(glyph_cache_t));
+
+    /* Direct all rendering to the offscreen render-target texture.
+     * This persists across SDL_RenderPresent() calls (unlike the default
+     * back buffer which is undefined after present with double-buffering).
+     * photon_sdl_present() blits this texture to the screen. */
+    SDL_SetRenderTarget(ren, ctx->texture);
+
     /* Clear to black */
     SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
     SDL_RenderClear(ren);
+
+    /* Blit the cleared render target to screen */
+    SDL_SetRenderTarget(ren, NULL);
+    SDL_RenderCopy(ren, ctx->texture, NULL, NULL);
     SDL_RenderPresent(ren);
+
+    /* Leave render target active for subsequent draw calls */
+    SDL_SetRenderTarget(ren, ctx->texture);
 
     return ctx;
 }
@@ -514,6 +630,10 @@ void photon_sdl_free(photon_sdl_t *ctx)
     if (!ctx) return;
     if (ctx->texture) SDL_DestroyTexture(ctx->texture);
     if (ctx->cp437_atlas) SDL_DestroyTexture(ctx->cp437_atlas);
+    if (ctx->glyph_cache) {
+        glyph_cache_clear(ctx->glyph_cache);
+        free(ctx->glyph_cache);
+    }
     if (ctx->ren)     SDL_DestroyRenderer(ctx->ren);
     if (ctx->win)     SDL_DestroyWindow(ctx->win);
     if (ctx->font)    TTF_CloseFont(ctx->font);
@@ -528,9 +648,19 @@ void photon_sdl_set_palette(photon_sdl_t *ctx, int index,
                             uint8_t r, uint8_t g, uint8_t b)
 {
     if (!ctx || index < 0 || index > 255) return;
+    if (ctx->pal[index].r == r &&
+        ctx->pal[index].g == g &&
+        ctx->pal[index].b == b)
+        return;  /* no change */
     ctx->pal[index].r = r;
     ctx->pal[index].g = g;
     ctx->pal[index].b = b;
+    /* Palette changed: shadow buffer tracks palette indices, not RGB.
+     * Mark dirty so the next draw pass re-renders all cells with the
+     * new palette mapping.  This fixes UI dialogs rendering with stale
+     * terminal colours when the theme palette differs from the session
+     * ANSI palette (e.g. black terminal bg vs blue theme bg). */
+    ctx->pal_dirty = true;
 }
 
 void photon_sdl_set_ttf_mode(photon_sdl_t *ctx, bool enable)
@@ -560,7 +690,7 @@ bool photon_sdl_set_font_size(photon_sdl_t *ctx, int pt,
 
     /* Load replacement TTF font from embedded Terminus data */
     TTF_Font *new_font = NULL;
-    if (photon_terminus_ttf && photon_terminus_ttf_size > 0) {
+    if (photon_terminus_ttf_size > 0) {
         SDL_RWops *rw = SDL_RWFromConstMem(photon_terminus_ttf,
                                            (int)photon_terminus_ttf_size);
         if (rw) new_font = TTF_OpenFontRW(rw, 1, pt);
@@ -626,6 +756,10 @@ bool photon_sdl_set_font_size(photon_sdl_t *ctx, int pt,
     /* Replace font, geometry */
     TTF_CloseFont(ctx->font);
     ctx->font   = new_font;
+
+    /* Invalidate glyph texture cache - cell dimensions changed */
+    if (ctx->glyph_cache) glyph_cache_clear(ctx->glyph_cache);
+
     if (new_emoji) {
         if (ctx->emoji_font) TTF_CloseFont(ctx->emoji_font);
         ctx->emoji_font = new_emoji;
@@ -651,10 +785,11 @@ bool photon_sdl_set_font_size(photon_sdl_t *ctx, int pt,
                         ? (float)draw_w / (float)new_win_w : 1.0f;
     SDL_RenderSetScale(ctx->ren, ctx->retina_scale, ctx->retina_scale);
 
-    /* Rebuild texture to match new window size */
+    /* Rebuild render-target texture to match new window size */
     if (ctx->texture) {
         SDL_DestroyTexture(ctx->texture);
         ctx->texture = make_texture(ctx->ren, new_win_w, new_win_h);
+        SDL_SetRenderTarget(ctx->ren, ctx->texture);
     }
 
     /* Update shadow buffer dimensions.
@@ -679,7 +814,7 @@ bool photon_sdl_set_font_size(photon_sdl_t *ctx, int pt,
         }
     }
 
-    SDL_RenderPresent(ctx->ren);
+    photon_sdl_present(ctx);
 
     PHOTON_DBG("set_font_size: %dpt -> cell %dx%d, win %dx%d",
                pt, cell_w, cell_h, new_win_w, new_win_h);
@@ -828,9 +963,23 @@ void photon_sdl_draw_cell(photon_sdl_t *ctx, int col, int row,
     if (col < 1 || col > ctx->cols) return;
     if (row < 1 || row > ctx->rows) return;
 
-    /* Update shadow buffer */
-    if (ctx->shadow && col <= ctx->shadow_cols && row <= ctx->shadow_rows)
-        ctx->shadow[(row - 1) * ctx->shadow_cols + (col - 1)] = *cell;
+    /* Flush palette dirty: invalidate shadow so every cell re-renders
+     * with the new palette RGB mapping. */
+    if (ctx->pal_dirty) {
+        photon_sdl_invalidate(ctx);
+        ctx->pal_dirty = false;
+    }
+
+    /* Skip draw if shadow buffer already matches (avoids redundant SDL calls) */
+    if (ctx->shadow && col <= ctx->shadow_cols && row <= ctx->shadow_rows) {
+        vte_cell_t *sh = &ctx->shadow[(row - 1) * ctx->shadow_cols + (col - 1)];
+        if (sh->codepoint == cell->codepoint &&
+            sh->fg == cell->fg && sh->bg == cell->bg &&
+            sh->attr == cell->attr &&
+            sh->fg_rgb == cell->fg_rgb && sh->bg_rgb == cell->bg_rgb)
+            return;
+        *sh = *cell;
+    }
 
     int fg_idx = cell->fg;   /* full 0-255 xterm palette index */
     int bg_idx = cell->bg;   /* full 0-255 xterm palette index */
@@ -848,19 +997,6 @@ void photon_sdl_draw_cell(photon_sdl_t *ctx, int col, int row,
 
     SDL_Color fg = pal_color(ctx, fg_idx);
     SDL_Color bg = pal_color(ctx, bg_idx);
-
-    /* Debug: log first few colored cells to verify palette */
-    {
-        static int color_log_count = 0;
-        if (color_log_count < 20 && (fg_idx != 7 || bg_idx != 0)) {
-            PHOTON_DBG("draw_cell: col=%d row=%d cp=U+%04X fg_idx=%d bg_idx=%d "
-                       "fg=#%02x%02x%02x bg=#%02x%02x%02x attr=0x%02x ttf=%d",
-                       col, row, cell->codepoint, fg_idx, bg_idx,
-                       fg.r, fg.g, fg.b, bg.r, bg.g, bg.b,
-                       cell->attr, ctx->use_ttf);
-            color_log_count++;
-        }
-    }
 
     /* Override palette lookup with truecolor values if set */
     if (!reversed) {
@@ -928,29 +1064,50 @@ void photon_sdl_draw_cell(photon_sdl_t *ctx, int col, int row,
         glyph_drawn = true;
     }
     if (!glyph_drawn) {
-        /* TTF rendering: try primary font, fall back to emoji font */
-        TTF_Font *render_font = ctx->font;
-        if (render_font && !TTF_GlyphIsProvided32(render_font, cp) &&
-            ctx->emoji_font && TTF_GlyphIsProvided32(ctx->emoji_font, cp)) {
-            render_font = ctx->emoji_font;
-        }
-        SDL_Surface *surf = render_font
-            ? TTF_RenderGlyph32_Blended(render_font, cp, fg) : NULL;
-        if (surf) {
-            SDL_Texture *tex = SDL_CreateTextureFromSurface(ctx->ren, surf);
-            SDL_FreeSurface(surf);
-            if (tex) {
-                int gw, gh;
-                SDL_QueryTexture(tex, NULL, NULL, &gw, &gh);
-                SDL_Rect src  = { 0, 0, gw, gh };
-                SDL_Rect gdst = {
-                    dst.x,
-                    dst.y + (ctx->cell_h - gh) / 2,
-                    (gw < ctx->cell_w) ? gw : ctx->cell_w,
-                    gh
-                };
-                SDL_RenderCopy(ctx->ren, tex, &src, &gdst);
-                SDL_DestroyTexture(tex);
+        /* TTF rendering with glyph texture cache */
+        int gw = 0, gh = 0;
+        SDL_Texture *cached = ctx->glyph_cache
+            ? glyph_cache_get(ctx->glyph_cache, cp, fg.r, fg.g, fg.b, &gw, &gh)
+            : NULL;
+        if (cached) {
+            /* Cache hit - just blit the cached texture */
+            SDL_Rect src  = { 0, 0, gw, gh };
+            SDL_Rect gdst = {
+                dst.x,
+                dst.y + (ctx->cell_h - gh) / 2,
+                (gw < ctx->cell_w) ? gw : ctx->cell_w,
+                gh
+            };
+            SDL_RenderCopy(ctx->ren, cached, &src, &gdst);
+        } else {
+            /* Cache miss - render glyph, cache the texture */
+            TTF_Font *render_font = ctx->font;
+            if (render_font && !TTF_GlyphIsProvided32(render_font, cp) &&
+                ctx->emoji_font && TTF_GlyphIsProvided32(ctx->emoji_font, cp)) {
+                render_font = ctx->emoji_font;
+            }
+            SDL_Surface *surf = render_font
+                ? TTF_RenderGlyph32_Blended(render_font, cp, fg) : NULL;
+            if (surf) {
+                SDL_Texture *tex = SDL_CreateTextureFromSurface(ctx->ren, surf);
+                SDL_FreeSurface(surf);
+                if (tex) {
+                    SDL_QueryTexture(tex, NULL, NULL, &gw, &gh);
+                    SDL_Rect src  = { 0, 0, gw, gh };
+                    SDL_Rect gdst = {
+                        dst.x,
+                        dst.y + (ctx->cell_h - gh) / 2,
+                        (gw < ctx->cell_w) ? gw : ctx->cell_w,
+                        gh
+                    };
+                    SDL_RenderCopy(ctx->ren, tex, &src, &gdst);
+                    /* Cache it (transfers ownership on success) */
+                    if (ctx->glyph_cache)
+                        glyph_cache_put(ctx->glyph_cache, cp,
+                                        fg.r, fg.g, fg.b, tex, gw, gh);
+                    else
+                        SDL_DestroyTexture(tex);
+                }
             }
         }
     }
@@ -1035,7 +1192,7 @@ void photon_sdl_clear_rect(photon_sdl_t *ctx,
     if (col2 > ctx->cols) col2 = ctx->cols;
     if (row2 > ctx->rows) row2 = ctx->rows;
 
-    SDL_Color bgc = pal_color(ctx, bg & 0x07);
+    SDL_Color bgc = pal_color(ctx, bg & 0x0f);
     SDL_SetRenderDrawColor(ctx->ren, bgc.r, bgc.g, bgc.b, 255);
 
     SDL_Rect r = {
@@ -1047,12 +1204,61 @@ void photon_sdl_clear_rect(photon_sdl_t *ctx,
     SDL_RenderFillRect(ctx->ren, &r);
 }
 
+/* ── Bulk fill rect (single SDL call + shadow update) ───────────────── */
+
+void photon_sdl_fill_rect(photon_sdl_t *ctx,
+                          int col1, int row1, int col2, int row2,
+                          uint8_t fg, uint8_t bg)
+{
+    if (!ctx) return;
+    if (col1 < 1) col1 = 1;
+    if (row1 < 1) row1 = 1;
+    if (col2 > ctx->cols) col2 = ctx->cols;
+    if (row2 > ctx->rows) row2 = ctx->rows;
+    if (col1 > col2 || row1 > row2) return;
+
+    /* Single GPU fill for the entire region */
+    SDL_Color bgc = pal_color(ctx, bg & 0x0f);
+    SDL_SetRenderDrawColor(ctx->ren, bgc.r, bgc.g, bgc.b, 255);
+    SDL_Rect r = {
+        (col1 - 1) * ctx->cell_w,
+        (row1 - 1) * ctx->cell_h,
+        (col2 - col1 + 1) * ctx->cell_w,
+        (row2 - row1 + 1) * ctx->cell_h
+    };
+    SDL_RenderFillRect(ctx->ren, &r);
+
+    /* Update shadow buffer in bulk */
+    vte_cell_t blank = {
+        .codepoint = ' ',
+        .fg = fg, .bg = bg,
+        .attr = 0,
+        .fg_rgb = 0, .bg_rgb = 0,
+    };
+    if (ctx->shadow && ctx->shadow_cols >= col2 && ctx->shadow_rows >= row2) {
+        for (int row = row1; row <= row2; row++) {
+            vte_cell_t *dst = &ctx->shadow[(row - 1) * ctx->shadow_cols + (col1 - 1)];
+            int n = col2 - col1 + 1;
+            for (int i = 0; i < n; i++)
+                dst[i] = blank;
+        }
+    }
+}
+
 /* ── Present ────────────────────────────────────────────────────────── */
 
 void photon_sdl_present(photon_sdl_t *ctx)
 {
     if (!ctx) return;
+    /* Blit the persistent render-target texture to the screen back buffer,
+     * then flip.  All draw calls between presents go to ctx->texture
+     * (which retains its content across frames), so the shadow-buffer
+     * skip optimisation works correctly with double-buffered SDL. */
+    SDL_SetRenderTarget(ctx->ren, NULL);
+    SDL_RenderCopy(ctx->ren, ctx->texture, NULL, NULL);
     SDL_RenderPresent(ctx->ren);
+    /* Re-activate the render target for the next frame's draw calls */
+    SDL_SetRenderTarget(ctx->ren, ctx->texture);
 }
 
 /* ── Connecting splash ──────────────────────────────────────────────── */
@@ -1061,8 +1267,9 @@ void photon_sdl_show_connecting(photon_sdl_t *ctx, const char *bbs_name)
 {
     if (!ctx) return;
 
-    /* Black screen */
-    SDL_SetRenderDrawColor(ctx->ren, 0, 0, 0, 255);
+    /* Use current palette background (respects theme) */
+    SDL_Color bgc = pal_color(ctx, 0);  /* palette index 0 = background */
+    SDL_SetRenderDrawColor(ctx->ren, bgc.r, bgc.g, bgc.b, 255);
     SDL_RenderClear(ctx->ren);
 
     /* Build message string */
@@ -1074,8 +1281,8 @@ void photon_sdl_show_connecting(photon_sdl_t *ctx, const char *bbs_name)
 
     /* Use the TTF font to render centered text */
     if (ctx->font) {
-        SDL_Color white = {255, 255, 255, 255};
-        SDL_Surface *surf = TTF_RenderUTF8_Blended(ctx->font, msg, white);
+        SDL_Color fgc = pal_color(ctx, 7);  /* palette index 7 = foreground */
+        SDL_Surface *surf = TTF_RenderUTF8_Blended(ctx->font, msg, fgc);
         if (surf) {
             SDL_Texture *tex = SDL_CreateTextureFromSurface(ctx->ren, surf);
             if (tex) {
@@ -1094,7 +1301,9 @@ void photon_sdl_show_connecting(photon_sdl_t *ctx, const char *bbs_name)
         }
     }
 
-    SDL_RenderPresent(ctx->ren);
+    photon_sdl_present(ctx);
+    /* Invalidate shadow so next repaint fully redraws over the splash */
+    photon_sdl_invalidate(ctx);
 }
 
 bool photon_sdl_get_cell(const photon_sdl_t *ctx, int col, int row,
@@ -1111,6 +1320,14 @@ bool photon_sdl_get_cell(const photon_sdl_t *ctx, int col, int row,
 /* ── Full repaint from VTE ──────────────────────────────────────────── */
 
 /* Repaint from shadow buffer (used when window is exposed/uncovered) */
+/* Invalidate shadow buffer so the next photon_sdl_repaint() does a full redraw */
+void photon_sdl_invalidate(photon_sdl_t *ctx)
+{
+    if (ctx && ctx->shadow && ctx->shadow_cols > 0 && ctx->shadow_rows > 0)
+        memset(ctx->shadow, 0,
+               (size_t)ctx->shadow_cols * ctx->shadow_rows * sizeof(vte_cell_t));
+}
+
 void photon_sdl_repaint_shadow(photon_sdl_t *ctx)
 {
     if (!ctx || !ctx->shadow) return;
@@ -1128,17 +1345,43 @@ void photon_sdl_repaint(photon_sdl_t *ctx, vte_t *vte)
 {
     if (!ctx || !vte) return;
 
-    SDL_SetRenderDrawColor(ctx->ren, 0, 0, 0, 255);
-    SDL_RenderClear(ctx->ren);
+    /* Flush palette dirty: invalidate shadow so every cell re-renders
+     * with the new palette RGB mapping. */
+    if (ctx->pal_dirty) {
+        photon_sdl_invalidate(ctx);
+        ctx->pal_dirty = false;
+    }
 
     int rows = (vte_rows(vte) < ctx->rows) ? vte_rows(vte) : ctx->rows;
     int cols = (vte_cols(vte) < ctx->cols) ? vte_cols(vte) : ctx->cols;
 
+    bool have_shadow = (ctx->shadow != NULL &&
+                        ctx->shadow_cols == ctx->cols &&
+                        ctx->shadow_rows == ctx->rows);
+
+    /* Direct pointer to VTE screen buffer avoids per-cell function call overhead */
+    const vte_cell_t *screen = vte_screen_ptr(vte);
+    int vte_cols_n = vte_cols(vte);
+
+    /* Single-pass dirty-cell repaint: skip cells that already match the
+     * shadow buffer.  draw_cell fills the background rect per cell, so
+     * we don't need a full SDL_RenderClear for incremental updates.
+     * Each call to draw_cell updates the shadow, so the next repaint
+     * cycle will skip those cells again if unchanged. */
     for (int r = 1; r <= rows; r++) {
-        for (int c = 1; c <= cols; c++) {
-            vte_cell_t cell;
-            if (vte_get_cell(vte, c, r, &cell))
-                photon_sdl_draw_cell(ctx, c, r, &cell);
+        const vte_cell_t *row_src = screen
+            ? &screen[(r-1) * vte_cols_n] : NULL;
+        vte_cell_t *row_shd = have_shadow
+            ? &ctx->shadow[(r-1) * ctx->shadow_cols] : NULL;
+
+        for (int c = 0; c < cols; c++) {
+            const vte_cell_t *cell = row_src ? &row_src[c] : NULL;
+            if (!cell) continue;
+
+            if (row_shd && memcmp(&row_shd[c], cell, sizeof(vte_cell_t)) == 0)
+                continue;
+
+            photon_sdl_draw_cell(ctx, c + 1, r, cell);
         }
     }
 
@@ -1162,6 +1405,27 @@ static void vte_cb_cursor(vte_t *vte, int col, int row, void *user)
     ctx->cur_row = row;
 }
 
+/* Scroll callback: invalidate the shadow buffer for the scroll region so
+ * photon_sdl_repaint() fully redraws those rows from VTE's screen buffer.
+ * The render target texture retains pixel content across frames, so we
+ * cannot just shift the shadow without also shifting the texture pixels;
+ * blanking the shadow region is the simplest correct approach. */
+static bool vte_cb_scroll(vte_t *vte, int top, int bot, int n, int dir, void *user)
+{
+    (void)vte; (void)n; (void)dir;
+    photon_sdl_t *ctx = (photon_sdl_t *)user;
+    if (!ctx->shadow) return false;
+    int scols = ctx->shadow_cols;
+    int srows = ctx->shadow_rows;
+    if (top < 1 || bot > srows || top > bot) return false;
+
+    /* Zero out the scroll region so every cell compares as dirty */
+    for (int r = top; r <= bot; r++)
+        memset(&ctx->shadow[(r - 1) * scols], 0,
+               sizeof(vte_cell_t) * (size_t)scols);
+    return true;
+}
+
 /* response callback is set by the connection layer, not by sdl */
 
 vte_callbacks_t photon_sdl_make_vte_callbacks(photon_sdl_t *ctx)
@@ -1173,6 +1437,7 @@ vte_callbacks_t photon_sdl_make_vte_callbacks(photon_sdl_t *ctx)
         .response = NULL,
         .title    = NULL,   /* set via photon_sdl_set_vte_title_cb() if desired */
         .bell     = NULL,
+        .scroll   = vte_cb_scroll,
         .user     = ctx,
     };
     return cbs;
@@ -1192,9 +1457,11 @@ void photon_sdl_bell_flash(photon_sdl_t *ctx)
     SDL_SetRenderDrawBlendMode(ctx->ren, SDL_BLENDMODE_BLEND);
     SDL_SetRenderDrawColor(ctx->ren, 255, 255, 255, 100);
     SDL_RenderFillRect(ctx->ren, NULL);  /* full window */
-    SDL_RenderPresent(ctx->ren);
+    photon_sdl_present(ctx);
     SDL_Delay(80);
-    /* Repaint will restore normal content on next frame */
+    /* Invalidate shadow so next repaint redraws all cells (the white overlay
+     * contaminated the render target and must be fully overwritten). */
+    photon_sdl_invalidate(ctx);
 }
 
 /* ── SDL event -> key translation ───────────────────────────────────── */
@@ -1238,6 +1505,10 @@ static void translate_sdl_event(photon_sdl_t *ctx, const SDL_Event *ev)
         }
         if (ev->window.event == SDL_WINDOWEVENT_EXPOSED) {
             ctx->expose_pending = true;
+            /* Invalidate shadow so next repaint redraws all cells */
+            if (ctx->shadow && ctx->shadow_cols > 0 && ctx->shadow_rows > 0)
+                memset(ctx->shadow, 0,
+                       (size_t)ctx->shadow_cols * ctx->shadow_rows * sizeof(vte_cell_t));
         }
         return;
     }
@@ -1357,6 +1628,12 @@ static void translate_sdl_event(photon_sdl_t *ctx, const SDL_Event *ev)
             ctx->shadow_cols = nc;
             ctx->shadow_rows = nr;
             for (int i = 0; i < nc * nr; i++) ctx->shadow[i] = (vte_cell_t){0};
+            /* Recreate render target texture for new window size */
+            if (ctx->texture) {
+                SDL_DestroyTexture(ctx->texture);
+                ctx->texture = make_texture(ctx->ren, w, h);
+                SDL_SetRenderTarget(ctx->ren, ctx->texture);
+            }
         }
         ctx->resize_pending = false;
         return;
@@ -1551,6 +1828,14 @@ int photon_sdl_rows(const photon_sdl_t *ctx)
     return (ctx->resize_pending && ctx->pending_rows > 0)
            ? ctx->pending_rows : ctx->rows;
 }
+const vte_cell_t *photon_sdl_shadow_ptr(const photon_sdl_t *ctx)
+{
+    return ctx ? ctx->shadow : NULL;
+}
+int photon_sdl_shadow_cols(const photon_sdl_t *ctx)
+{
+    return ctx ? ctx->shadow_cols : 0;
+}
 int photon_sdl_cell_width(const photon_sdl_t *ctx) { return ctx ? ctx->cell_w : 0; }
 int photon_sdl_cell_height(const photon_sdl_t *ctx){ return ctx ? ctx->cell_h : 0; }
 
@@ -1581,6 +1866,13 @@ bool photon_sdl_check_resize(photon_sdl_t *ctx, int *nc, int *nr)
     ctx->shadow_cols = new_cols;
     ctx->shadow_rows = new_rows;
 
+    /* Recreate render target texture for new window size */
+    if (ctx->texture) {
+        SDL_DestroyTexture(ctx->texture);
+        ctx->texture = make_texture(ctx->ren, ctx->win_w, ctx->win_h);
+        SDL_SetRenderTarget(ctx->ren, ctx->texture);
+    }
+
     if (nc) *nc = new_cols;
     if (nr) *nr = new_rows;
     return true;
@@ -1603,10 +1895,25 @@ void photon_sdl_notify_resize(photon_sdl_t *ctx, vte_t *vte,
     ctx->shadow_cols = new_cols;
     ctx->shadow_rows = new_rows;
 
+    /* Recreate render target texture for new window size */
+    if (ctx->texture) {
+        SDL_DestroyTexture(ctx->texture);
+        ctx->texture = make_texture(ctx->ren, ctx->win_w, ctx->win_h);
+        SDL_SetRenderTarget(ctx->ren, ctx->texture);
+    }
+
     SDL_SetWindowSize(ctx->win, ctx->win_w, ctx->win_h);
+
+    /* Recreate render target texture to match new window size */
+    if (ctx->texture) {
+        SDL_DestroyTexture(ctx->texture);
+        ctx->texture = make_texture(ctx->ren, ctx->win_w, ctx->win_h);
+        SDL_SetRenderTarget(ctx->ren, ctx->texture);
+    }
+
     if (vte) {
         vte_resize(vte, new_cols, new_rows);
         photon_sdl_repaint(ctx, vte);
-        SDL_RenderPresent(ctx->ren);
+        photon_sdl_present(ctx);
     }
 }

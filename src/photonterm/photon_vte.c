@@ -264,9 +264,9 @@ static void clear_cells_quiet(vte_t *v, int col1, int row1, int col2, int row2)
 }
 
 /* Scroll up within current scroll region by n lines. */
-static void scroll_up(vte_t *v, int n)
+static bool scroll_up(vte_t *v, int n)
 {
-    if (n <= 0) return;
+    if (n <= 0) return false;
     int top = v->margin_top;
     int bot = v->margin_bot;
     int region = bot - top + 1;
@@ -275,6 +275,11 @@ static void scroll_up(vte_t *v, int n)
     /* Push departing lines into scrollback */
     for (int i = 0; i < n; i++)
         sb_push_line(v, cell_at(v, 1, top + i));
+
+    /* Try hardware-accelerated scroll via callback */
+    bool handled = false;
+    if (v->cb.scroll)
+        handled = v->cb.scroll(v, top, bot, n, 1, v->cb.user);
 
     /* Shift lines up */
     int move = region - n;
@@ -285,16 +290,21 @@ static void scroll_up(vte_t *v, int n)
 
     /* Blank the vacated lines at the bottom */
     clear_cells_quiet(v, 1, bot - n + 1, v->cols, bot);
+    return handled;
 }
 
 /* Scroll down within current scroll region by n lines. */
-static void scroll_down(vte_t *v, int n)
+static bool scroll_down(vte_t *v, int n)
 {
-    if (n <= 0) return;
+    if (n <= 0) return false;
     int top = v->margin_top;
     int bot = v->margin_bot;
     int region = bot - top + 1;
     if (n > region) n = region;
+
+    bool handled = false;
+    if (v->cb.scroll)
+        handled = v->cb.scroll(v, top, bot, n, -1, v->cb.user);
 
     int move = region - n;
     if (move > 0)
@@ -303,6 +313,7 @@ static void scroll_down(vte_t *v, int n)
                 sizeof(vte_cell_t) * (size_t)(v->cols * move));
 
     clear_cells_quiet(v, 1, top, v->cols, top + n - 1);
+    return handled;
 }
 
 /* Clamp cursor to grid. */
@@ -333,11 +344,17 @@ static void print_char(vte_t *v, uint32_t cp)
         v->pending_wrap = false;
         v->cx = 1;
         if (v->cy == v->margin_bot) {
-            scroll_up(v, 1);
-            /* repaint entire scroll region after scroll */
-            for (int r = v->margin_top; r <= v->margin_bot; r++)
+            bool blit_ok = scroll_up(v, 1);
+            if (!blit_ok) {
+                /* Renderer didn't handle the scroll blit; repaint all rows */
+                for (int r = v->margin_top; r <= v->margin_bot; r++)
+                    for (int c = 1; c <= v->cols; c++)
+                        emit_cell(v, c, r, cell_at(v, c, r));
+            } else {
+                /* Renderer blitted; only emit the new blank bottom line */
                 for (int c = 1; c <= v->cols; c++)
-                    emit_cell(v, c, r, cell_at(v, c, r));
+                    emit_cell(v, c, v->margin_bot, cell_at(v, c, v->margin_bot));
+            }
         } else {
             v->cy++;
         }
@@ -543,20 +560,31 @@ static void dispatch_csi(vte_t *v, uint8_t final)
     case 'L': /* IL - insert lines */
     {
         int n = PARAM(0, 1);
-        scroll_down(v, n);
-        /* repaint scroll region */
-        for (int r = v->margin_top; r <= v->margin_bot; r++)
-            for (int c = 1; c <= v->cols; c++)
-                emit_cell(v, c, r, cell_at(v, c, r));
+        bool blit_ok = scroll_down(v, n);
+        if (!blit_ok) {
+            for (int r = v->margin_top; r <= v->margin_bot; r++)
+                for (int c = 1; c <= v->cols; c++)
+                    emit_cell(v, c, r, cell_at(v, c, r));
+        } else {
+            for (int r = v->margin_top; r < v->margin_top + n && r <= v->margin_bot; r++)
+                for (int c = 1; c <= v->cols; c++)
+                    emit_cell(v, c, r, cell_at(v, c, r));
+        }
         break;
     }
     case 'M': /* DL - delete lines */
     {
         int n = PARAM(0, 1);
-        scroll_up(v, n);
-        for (int r = v->margin_top; r <= v->margin_bot; r++)
-            for (int c = 1; c <= v->cols; c++)
-                emit_cell(v, c, r, cell_at(v, c, r));
+        bool blit_ok = scroll_up(v, n);
+        if (!blit_ok) {
+            for (int r = v->margin_top; r <= v->margin_bot; r++)
+                for (int c = 1; c <= v->cols; c++)
+                    emit_cell(v, c, r, cell_at(v, c, r));
+        } else {
+            for (int r = v->margin_bot - n + 1; r <= v->margin_bot; r++)
+                for (int c = 1; c <= v->cols; c++)
+                    emit_cell(v, c, r, cell_at(v, c, r));
+        }
         break;
     }
     case 'P': /* DCH - delete characters */
@@ -606,19 +634,31 @@ static void dispatch_csi(vte_t *v, uint8_t final)
     case 'S': /* SU - scroll up */
     {
         int n = PARAM(0, 1);
-        scroll_up(v, n);
-        for (int r = v->margin_top; r <= v->margin_bot; r++)
-            for (int c = 1; c <= v->cols; c++)
-                emit_cell(v, c, r, cell_at(v, c, r));
+        bool blit_ok = scroll_up(v, n);
+        if (!blit_ok) {
+            for (int r = v->margin_top; r <= v->margin_bot; r++)
+                for (int c = 1; c <= v->cols; c++)
+                    emit_cell(v, c, r, cell_at(v, c, r));
+        } else {
+            for (int r = v->margin_bot - n + 1; r <= v->margin_bot; r++)
+                for (int c = 1; c <= v->cols; c++)
+                    emit_cell(v, c, r, cell_at(v, c, r));
+        }
         break;
     }
     case 'T': /* SD - scroll down */
     {
         int n = PARAM(0, 1);
-        scroll_down(v, n);
-        for (int r = v->margin_top; r <= v->margin_bot; r++)
-            for (int c = 1; c <= v->cols; c++)
-                emit_cell(v, c, r, cell_at(v, c, r));
+        bool blit_ok = scroll_down(v, n);
+        if (!blit_ok) {
+            for (int r = v->margin_top; r <= v->margin_bot; r++)
+                for (int c = 1; c <= v->cols; c++)
+                    emit_cell(v, c, r, cell_at(v, c, r));
+        } else {
+            for (int r = v->margin_top; r < v->margin_top + n && r <= v->margin_bot; r++)
+                for (int c = 1; c <= v->cols; c++)
+                    emit_cell(v, c, r, cell_at(v, c, r));
+        }
         break;
     }
 
@@ -754,10 +794,15 @@ static void dispatch_esc(vte_t *v, uint8_t final)
             break;
         case 'D': /* IND - index (scroll down one) */
             if (v->cy == v->margin_bot) {
-                scroll_up(v, 1);
-                for (int r = v->margin_top; r <= v->margin_bot; r++)
+                bool blit_ok = scroll_up(v, 1);
+                if (!blit_ok) {
+                    for (int r = v->margin_top; r <= v->margin_bot; r++)
+                        for (int c = 1; c <= v->cols; c++)
+                            emit_cell(v, c, r, cell_at(v, c, r));
+                } else {
                     for (int c = 1; c <= v->cols; c++)
-                        emit_cell(v, c, r, cell_at(v, c, r));
+                        emit_cell(v, c, v->margin_bot, cell_at(v, c, v->margin_bot));
+                }
             } else {
                 v->cy++;
             }
@@ -765,10 +810,15 @@ static void dispatch_esc(vte_t *v, uint8_t final)
         case 'E': /* NEL - next line */
             v->cx = 1;
             if (v->cy == v->margin_bot) {
-                scroll_up(v, 1);
-                for (int r = v->margin_top; r <= v->margin_bot; r++)
+                bool blit_ok = scroll_up(v, 1);
+                if (!blit_ok) {
+                    for (int r = v->margin_top; r <= v->margin_bot; r++)
+                        for (int c = 1; c <= v->cols; c++)
+                            emit_cell(v, c, r, cell_at(v, c, r));
+                } else {
                     for (int c = 1; c <= v->cols; c++)
-                        emit_cell(v, c, r, cell_at(v, c, r));
+                        emit_cell(v, c, v->margin_bot, cell_at(v, c, v->margin_bot));
+                }
             } else {
                 v->cy++;
             }
@@ -776,10 +826,15 @@ static void dispatch_esc(vte_t *v, uint8_t final)
             break;
         case 'M': /* RI - reverse index */
             if (v->cy == v->margin_top) {
-                scroll_down(v, 1);
-                for (int r = v->margin_top; r <= v->margin_bot; r++)
+                bool blit_ok = scroll_down(v, 1);
+                if (!blit_ok) {
+                    for (int r = v->margin_top; r <= v->margin_bot; r++)
+                        for (int c = 1; c <= v->cols; c++)
+                            emit_cell(v, c, r, cell_at(v, c, r));
+                } else {
                     for (int c = 1; c <= v->cols; c++)
-                        emit_cell(v, c, r, cell_at(v, c, r));
+                        emit_cell(v, c, v->margin_top, cell_at(v, c, v->margin_top));
+                }
             } else {
                 v->cy--;
             }
@@ -829,10 +884,15 @@ static void execute(vte_t *v, uint8_t byte)
     case 0x0B: /* VT */
     case 0x0C: /* FF */
         if (v->cy == v->margin_bot) {
-            scroll_up(v, 1);
-            for (int r = v->margin_top; r <= v->margin_bot; r++)
+            bool blit_ok = scroll_up(v, 1);
+            if (!blit_ok) {
+                for (int r = v->margin_top; r <= v->margin_bot; r++)
+                    for (int c = 1; c <= v->cols; c++)
+                        emit_cell(v, c, r, cell_at(v, c, r));
+            } else {
                 for (int c = 1; c <= v->cols; c++)
-                    emit_cell(v, c, r, cell_at(v, c, r));
+                    emit_cell(v, c, v->margin_bot, cell_at(v, c, v->margin_bot));
+            }
         } else {
             v->cy++;
         }
@@ -1251,6 +1311,11 @@ bool vte_get_cell(const vte_t *v, int col, int row, vte_cell_t *out)
     if (!v || col < 1 || col > v->cols || row < 1 || row > v->rows) return false;
     if (out) *out = *cell_at((vte_t *)v, col, row);
     return true;
+}
+
+const vte_cell_t *vte_screen_ptr(const vte_t *v)
+{
+    return v ? v->screen : NULL;
 }
 
 int vte_cols(const vte_t *v) { return v ? v->cols : 0; }

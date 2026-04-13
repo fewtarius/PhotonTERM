@@ -135,9 +135,9 @@ static int put_str(photon_ui_t *ui, int col, int row,
 static void fill_rect(photon_ui_t *ui,
                       int c1, int r1, int c2, int r2, uint8_t attr)
 {
-    for (int r = r1; r <= r2; r++)
-        for (int c = c1; c <= c2; c++)
-            put_cell(ui, c, r, ' ', attr);
+    uint8_t fg = attr & 0x0f;
+    uint8_t bg = (attr >> 4) & 0x0f;
+    photon_sdl_fill_rect(photon_ui_sdl(ui), c1, r1, c2, r2, fg, bg);
 }
 
 /* Write a string padded/clipped to exactly `width` columns */
@@ -511,6 +511,7 @@ static void run_settings(photon_ui_t *ui, photon_settings_t *s)
     char term_val[64];
 
     photon_menu_form_state_t state = { .field = 0 };
+    bool redraw = true;
 
     for (;;) {
         /* Refresh display values */
@@ -543,21 +544,29 @@ static void run_settings(photon_ui_t *ui, photon_settings_t *s)
             .nhints  = sizeof(hints) / sizeof(hints[0]),
         };
 
-        photon_menu_draw_form(ui, &form, &state);
-        photon_sdl_present(photon_ui_sdl(ui));
+        if (redraw) {
+            photon_menu_draw_form(ui, &form, &state);
+            photon_sdl_present(photon_ui_sdl(ui));
+            redraw = false;
+        }
 
         photon_key_t key = {0};
-        if (!photon_sdl_wait_key(photon_ui_sdl(ui), &key, 100)) continue;
+        if (!photon_sdl_wait_key(photon_ui_sdl(ui), &key, 100)) {
+            if (photon_sdl_take_expose(photon_ui_sdl(ui)))
+                redraw = true;
+            continue;
+        }
         if (key.code == 0) continue;
 
-        /* Escape -> back */
-        if (key.code == '\x1b' || key.code == PHOTON_KEY_QUIT) break;
+        if (key.code == '\x1b' || key.code == PHOTON_KEY_QUIT)
+            return;
 
         /* Form navigation (arrows, tab, space for toggle) */
         if (photon_menu_form_handle_nav(&key, &state, &form)) {
             /* Toggle: also persist bell change immediately */
             g_bell_enabled = s->bell_enabled;
             photon_settings_save(s);
+            redraw = true;
             continue;
         }
 
@@ -590,6 +599,7 @@ static void run_settings(photon_ui_t *ui, photon_settings_t *s)
             }
             default: break;
             }
+            redraw = true;
         }
     }
 }
@@ -844,7 +854,11 @@ static photon_bbs_t *run_directory(photon_ui_t *ui, photon_settings_t *s,
         { "Esc",    " Back" },
     };
 
+    bool redraw = true;  /* Force initial draw */
+    int visible = 0;
+
     while (!done) {
+        if (redraw) {
         char title[80];
         snprintf(title, sizeof(title), "Directory%s", sort_mode_name(sort_mode));
 
@@ -860,21 +874,30 @@ static photon_bbs_t *run_directory(photon_ui_t *ui, photon_settings_t *s,
             .draw_header = dir_draw_header,
         };
 
-        int visible = photon_menu_draw_list(ui, &menu, &state);
+        visible = photon_menu_draw_list(ui, &menu, &state);
 
         /* Status bar: show entry info for selected item */
         if (count > 0 && state.cursor >= 0 && state.cursor < count)
             draw_entry_statusbar(ui, &list[state.cursor]);
 
         photon_sdl_present(photon_ui_sdl(ui));
+        redraw = false;
+        }
 
         photon_key_t key = {0};
-        if (!photon_sdl_wait_key(photon_ui_sdl(ui), &key, 100)) continue;
+        if (!photon_sdl_wait_key(photon_ui_sdl(ui), &key, 100)) {
+            /* Check for window expose/resize while idle */
+            if (photon_sdl_take_expose(photon_ui_sdl(ui)))
+                redraw = true;
+            continue;
+        }
         if (key.code == 0) continue;
 
         /* Standard list navigation (arrows, pgup/dn, home/end) */
-        if (photon_menu_list_handle_nav(&key, &state, count, visible))
+        if (photon_menu_list_handle_nav(&key, &state, count, visible)) {
+            redraw = true;
             continue;
+        }
 
         switch (key.code) {
         case PHOTON_KEY_QUIT:
@@ -975,6 +998,7 @@ static photon_bbs_t *run_directory(photon_ui_t *ui, photon_settings_t *s,
             }
             break;
         }
+        redraw = true;  /* Any key action may change display state */
     }
 
     free(list);
@@ -995,6 +1019,7 @@ photon_bbs_t *photon_bbslist_run(photon_ui_t *ui, bool start_in_directory,
     photon_bbs_t *result = NULL;
     bool done = false;
     bool quit = false;
+    bool redraw_splash = true;
 
     /* Splash loop */
     while (!done) {
@@ -1009,13 +1034,21 @@ photon_bbs_t *photon_bbslist_run(photon_ui_t *ui, bool start_in_directory,
             } else {
                 /* User cancelled the directory - show splash from here on */
                 start_in_directory = false;
+                redraw_splash = true;
             }
         } else {
-            draw_splash(ui);
-            photon_sdl_present(photon_ui_sdl(ui));
+            if (redraw_splash) {
+                draw_splash(ui);
+                photon_sdl_present(photon_ui_sdl(ui));
+                redraw_splash = false;
+            }
 
             photon_key_t key = {0};
-            if (!photon_sdl_wait_key(photon_ui_sdl(ui), &key, 200)) continue;
+            if (!photon_sdl_wait_key(photon_ui_sdl(ui), &key, 200)) {
+                if (photon_sdl_take_expose(photon_ui_sdl(ui)))
+                    redraw_splash = true;
+                continue;
+            }
             if (key.code == 0) continue;
 
             switch (key.code) {
@@ -1023,6 +1056,7 @@ photon_bbs_t *photon_bbslist_run(photon_ui_t *ui, bool start_in_directory,
                 /* Confirm quit */
                 if (photon_ui_confirm(ui, "Quit PhotonTERM?"))
                     done = true;
+                redraw_splash = true;
                 break;
 
             case PHOTON_KEY_QUIT:
@@ -1032,6 +1066,7 @@ photon_bbs_t *photon_bbslist_run(photon_ui_t *ui, bool start_in_directory,
             case '\t': /* Tab -> Settings from splash */
                 {
                     run_settings(ui, &s);
+                    redraw_splash = true;
                 }
                 break;
 
@@ -1040,6 +1075,8 @@ photon_bbs_t *photon_bbslist_run(photon_ui_t *ui, bool start_in_directory,
                 result = run_directory(ui, &s, NULL, &quit);
                 if (result || quit)
                     done = true;
+                else
+                    redraw_splash = true;
                 /* else: user ESC'd from directory - loop back to splash */
                 break;
             }

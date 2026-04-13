@@ -9,6 +9,7 @@
 #include "photon_ui.h"
 #include "photon_sdl.h"
 #include "photon_vte.h"
+#include "photon_settings.h"
 
 #include <assert.h>
 #include <ctype.h>
@@ -109,12 +110,19 @@ photon_ui_screen_t *photon_ui_save_screen(photon_ui_t *ui)
     s->cols = cols;
     s->rows = rows;
 
-    for (int r = 1; r <= rows; r++)
-        for (int c = 1; c <= cols; c++) {
-            vte_cell_t cell = {0};
-            photon_sdl_get_cell(ui->sdl, c, r, &cell);
-            s->cells[(r - 1) * cols + (c - 1)] = cell;
-        }
+    /* Bulk copy from shadow buffer (fast path) */
+    const vte_cell_t *shadow = photon_sdl_shadow_ptr(ui->sdl);
+    int shadow_cols = photon_sdl_shadow_cols(ui->sdl);
+    if (shadow && shadow_cols == cols) {
+        memcpy(s->cells, shadow, n * sizeof(vte_cell_t));
+    } else {
+        for (int r = 1; r <= rows; r++)
+            for (int c = 1; c <= cols; c++) {
+                vte_cell_t cell = {0};
+                photon_sdl_get_cell(ui->sdl, c, r, &cell);
+                s->cells[(r - 1) * cols + (c - 1)] = cell;
+            }
+    }
     return s;
 }
 
@@ -139,19 +147,6 @@ void photon_ui_free_screen(photon_ui_screen_t *s)
 
 /* Paint a saved screen into the renderer without presenting.
    Used to restore background before drawing a dialog on top. */
-static void repaint_saved(photon_ui_t *ui, const photon_ui_screen_t *s)
-{
-    if (!ui || !s) return;
-    int cols = s->cols < photon_sdl_cols(ui->sdl)
-               ? s->cols : photon_sdl_cols(ui->sdl);
-    int rows = s->rows < photon_sdl_rows(ui->sdl)
-               ? s->rows : photon_sdl_rows(ui->sdl);
-    for (int r = 1; r <= rows; r++)
-        for (int c = 1; c <= cols; c++)
-            photon_sdl_draw_cell(ui->sdl, c, r,
-                &s->cells[(r-1)*s->cols + (c-1)]);
-}
-
 /* ── Low-level draw helpers ────────────────────────────────────────────── */
 
 static void ui_put_cell(photon_ui_t *ui, int col, int row,
@@ -195,9 +190,7 @@ static void ui_fill_rect(photon_ui_t *ui,
                          int col1, int row1, int col2, int row2,
                          uint8_t fg, uint8_t bg)
 {
-    for (int r = row1; r <= row2; r++)
-        for (int c = col1; c <= col2; c++)
-            ui_put_cell(ui, c, r, ' ', fg, bg, 0);
+    photon_sdl_fill_rect(ui->sdl, col1, row1, col2, row2, fg, bg);
 }
 
 /* Draw a box; title may be NULL */
@@ -297,7 +290,11 @@ int photon_ui_list(photon_ui_t *ui,
     /* Save screen */
     photon_ui_screen_t *saved = photon_ui_save_screen(ui);
 
-    /* Current selection */
+   /* Current selection */
+    /* Push theme palette so dialog colors match the UI theme */
+    uint8_t pal_buf[768];
+    photon_theme_push_palette(ui->sdl, pal_buf);
+
     int sel    = cur ? *cur : 0;
     int scroll = 0;  /* first visible item index */
 
@@ -305,17 +302,19 @@ int photon_ui_list(photon_ui_t *ui,
     if (sel >= n_items) sel = n_items - 1;
 
     const photon_ui_colors_t *cl = &ui->colors;
+    bool redraw = true;
 
     for (;;) {
         /* Adjust scroll so sel is visible */
         if (sel < scroll) scroll = sel;
         if (sel >= scroll + vis_rows) scroll = sel - vis_rows + 1;
 
-        /* Repaint background from saved screen first to avoid
-         * back-buffer flicker with hardware-accelerated SDL rendering */
-        if (saved) {
-            repaint_saved(ui, saved);
-        }
+        if (redraw) {
+        /* Fill entire grid with theme bg for consistent backdrop.
+         * This also clears the SDL back-buffer, preventing flicker
+         * from hardware-accelerated double-buffering. */
+        ui_fill_rect(ui, 1, 1, ui_grid_cols(ui), ui_grid_rows(ui),
+                     cl->normal_fg, cl->normal_bg);
 
         /* Draw box */
         ui_draw_box(ui, col1, row1, col2, row2, title);
@@ -351,40 +350,52 @@ int photon_ui_list(photon_ui_t *ui,
                         cl->border_fg, cl->border_bg, 0);
 
         photon_sdl_present(ui->sdl);
+        redraw = false;
+        }
 
         /* Wait for key */
         photon_key_t key = {0};
-        if (!photon_sdl_wait_key(ui->sdl, &key, 100)) continue;
+        if (!photon_sdl_wait_key(ui->sdl, &key, 100)) {
+            if (photon_sdl_take_expose(ui->sdl))
+                redraw = true;
+            continue;
+        }
         if (key.code == 0) continue;
 
         switch (key.code) {
         case PHOTON_KEY_UP:
-            if (sel > 0) sel--;
+            if (sel > 0) { sel--; redraw = true; }
             break;
         case PHOTON_KEY_DOWN:
-            if (sel < n_items - 1) sel++;
+            if (sel < n_items - 1) { sel++; redraw = true; }
             break;
         case PHOTON_KEY_PGUP:
             sel -= vis_rows - 1;
             if (sel < 0) sel = 0;
+            redraw = true;
             break;
         case PHOTON_KEY_PGDN:
             sel += vis_rows - 1;
             if (sel >= n_items) sel = n_items - 1;
+            redraw = true;
             break;
         case PHOTON_KEY_HOME:
             sel = 0;
+            redraw = true;
             break;
         case PHOTON_KEY_END:
             sel = n_items - 1;
+            redraw = true;
             break;
         case '\r':
-            if (cur) *cur = sel;
+           if (cur) *cur = sel;
+            photon_theme_pop_palette(ui->sdl, pal_buf);
             photon_ui_restore_screen(ui, saved);
             photon_ui_free_screen(saved);
             return sel;
         case 27:  /* ESC */
         case PHOTON_KEY_QUIT:
+            photon_theme_pop_palette(ui->sdl, pal_buf);
             photon_ui_restore_screen(ui, saved);
             photon_ui_free_screen(saved);
             return -1;
@@ -396,6 +407,7 @@ int photon_ui_list(photon_ui_t *ui,
                     int next = (sel + 1 + i) % n_items;
                     if (tolower((unsigned char)items[next][0]) == (unsigned char)ch) {
                         sel = next;
+                        redraw = true;
                         break;
                     }
                 }
@@ -434,20 +446,26 @@ int photon_ui_input(photon_ui_t *ui,
     photon_ui_screen_t *saved = (flags & PHOTON_INPUT_NOSAVE)
                                 ? NULL
                                 : photon_ui_save_screen(ui);
+
+    /* Push theme palette so dialog colors match the UI theme */
+    uint8_t pal_buf[768];
+    photon_theme_push_palette(ui->sdl, pal_buf);
+
     const photon_ui_colors_t *cl = &ui->colors;
 
     int pos   = (int)strlen(buf);
     int view  = 0;  /* scroll offset within buf */
+    bool redraw = true;
 
     for (;;) {
         /* Keep cursor visible */
         if (pos < view) view = pos;
         if (pos > view + max_field - 1) view = pos - max_field + 1;
 
-        /* Repaint background from saved screen before drawing dialog */
-        if (saved) {
-            repaint_saved(ui, saved);
-        }
+        if (redraw) {
+        /* Fill entire grid with theme bg for consistent backdrop */
+        ui_fill_rect(ui, 1, 1, ui_grid_cols(ui), ui_grid_rows(ui),
+                     cl->normal_fg, cl->normal_bg);
 
         ui_draw_box(ui, col1, row1, col2, row2, title);
 
@@ -479,9 +497,15 @@ int photon_ui_input(photon_ui_t *ui,
                     cl->input_bg, cl->input_fg, 0);  /* inverted */
 
         photon_sdl_present(ui->sdl);
+        redraw = false;
+        }
 
         photon_key_t key = {0};
-        if (!photon_sdl_wait_key(ui->sdl, &key, 100)) continue;
+        if (!photon_sdl_wait_key(ui->sdl, &key, 100)) {
+            if (photon_sdl_take_expose(ui->sdl))
+                redraw = true;
+            continue;
+        }
         PHOTON_DBG("photon_ui_input: got key code=0x%x text='%s'", key.code, key.text);
         if (key.code == 0) continue;
 
@@ -499,12 +523,14 @@ int photon_ui_input(photon_ui_t *ui,
                 while (l > 0 && buf[l-1] == ' ') buf[--l] = '\0';
             }
             int ret = (int)strlen(buf);
+            photon_theme_pop_palette(ui->sdl, pal_buf);
             photon_ui_restore_screen(ui, saved);
             photon_ui_free_screen(saved);
             return ret;
         }
 
         if (key.code == 27 || key.code == PHOTON_KEY_QUIT) {
+            photon_theme_pop_palette(ui->sdl, pal_buf);
             photon_ui_restore_screen(ui, saved);
             photon_ui_free_screen(saved);
             return -1;
@@ -533,6 +559,7 @@ int photon_ui_input(photon_ui_t *ui,
                 memmove(buf + pos - 1, buf + pos, (size_t)(len2 - pos + 1));
                 pos--;
             }
+            redraw = true;
             continue;
         }
 
@@ -546,6 +573,7 @@ int photon_ui_input(photon_ui_t *ui,
             buf[pos] = ch;
             pos++;
         }
+        redraw = true;
     }
 }
 
@@ -606,10 +634,18 @@ bool photon_ui_form(photon_ui_t *ui,
     photon_ui_screen_t *saved = photon_ui_save_screen(ui);
 
     int active = 0;
+    /* Push theme palette so dialog colors match the UI theme */
+    uint8_t pal_buf[768];
+    photon_theme_push_palette(ui->sdl, pal_buf);
+
     bool result = false;
+    bool redraw = true;
 
     for (;;) {
-        repaint_saved(ui, saved);
+        if (redraw) {
+        /* Fill entire grid with theme bg for consistent backdrop */
+        ui_fill_rect(ui, 1, 1, ui_grid_cols(ui), ui_grid_rows(ui),
+                     cl->normal_fg, cl->normal_bg);
         /* Draw box chrome */
         ui_draw_box(ui, col1, row1, col2, row2, title);
 
@@ -688,9 +724,15 @@ bool photon_ui_form(photon_ui_t *ui,
         }
 
         photon_sdl_present(ui->sdl);
+        redraw = false;
+        }
 
         photon_key_t key = {0};
-        if (!photon_sdl_wait_key(ui->sdl, &key, 100)) continue;
+        if (!photon_sdl_wait_key(ui->sdl, &key, 100)) {
+            if (photon_sdl_take_expose(ui->sdl))
+                redraw = true;
+            continue;
+        }
         if (key.code == 0) continue;
         PHOTON_DBG("photon_ui_form: key code=0x%x mod=0x%x text='%s' active=%d", key.code, key.mod, key.text, active);
 
@@ -704,12 +746,14 @@ bool photon_ui_form(photon_ui_t *ui,
         if (key.code == PHOTON_KEY_UP ||
             (key.code == '\t' && (key.mod & PHOTON_MOD_SHIFT))) {
             active = (active - 1 + n_fields) % n_fields;
+            redraw = true;
             continue;
         }
 
         /* Tab or Down - next field */
         if (key.code == '\t' || key.code == PHOTON_KEY_DOWN) {
             active = (active + 1) % n_fields;
+            redraw = true;
             continue;
         }
 
@@ -717,6 +761,7 @@ bool photon_ui_form(photon_ui_t *ui,
         if (key.code == '\r') {
             if (active < n_fields - 1) {
                 active++;
+                redraw = true;
                 continue;
             }
             result = true;
@@ -749,6 +794,7 @@ bool photon_ui_form(photon_ui_t *ui,
                     f->buf[f->buflen - 1] = '\0';
                 }
             }
+            redraw = true;
             continue;
         }
 
@@ -808,10 +854,12 @@ bool photon_ui_form(photon_ui_t *ui,
             if (*v < 0) *v = 0;
             (void)ln;
         }
+        redraw = true;
     }
 
     free(pos);
     free(view);
+    photon_theme_pop_palette(ui->sdl, pal_buf);
     photon_ui_restore_screen(ui, saved);
     photon_ui_free_screen(saved);
     return result;
@@ -837,8 +885,13 @@ void photon_ui_msg(photon_ui_t *ui, const char *message)
     photon_ui_screen_t *saved = photon_ui_save_screen(ui);
     const photon_ui_colors_t *cl = &ui->colors;
 
-    /* Repaint background from saved screen before drawing dialog */
-    repaint_saved(ui, saved);
+    /* Push theme palette so dialog colors match the UI theme */
+    uint8_t pal_buf[768];
+    photon_theme_push_palette(ui->sdl, pal_buf);
+
+    /* Fill entire grid with theme bg for consistent backdrop */
+    ui_fill_rect(ui, 1, 1, ui_grid_cols(ui), ui_grid_rows(ui),
+                 cl->normal_fg, cl->normal_bg);
 
     ui_draw_box(ui, col1, row1, col2, row2, NULL);
 
@@ -859,6 +912,7 @@ void photon_ui_msg(photon_ui_t *ui, const char *message)
         if (photon_sdl_quit_requested(ui->sdl)) break;
     }
 
+    photon_theme_pop_palette(ui->sdl, pal_buf);
     photon_ui_restore_screen(ui, saved);
     photon_ui_free_screen(saved);
 }
@@ -921,10 +975,19 @@ void photon_ui_showbuf(photon_ui_t *ui,
 
     photon_ui_screen_t *saved = photon_ui_save_screen(ui);
     const photon_ui_colors_t *cl = &ui->colors;
+
+    /* Push theme palette so dialog colors match the UI theme */
+    uint8_t pal_buf[768];
+    photon_theme_push_palette(ui->sdl, pal_buf);
+
     int scroll = 0;
+    bool redraw = true;
 
     for (;;) {
-        repaint_saved(ui, saved);
+        if (redraw) {
+        /* Fill entire grid with theme bg for consistent backdrop */
+        ui_fill_rect(ui, 1, 1, ui_grid_cols(ui), ui_grid_rows(ui),
+                     cl->normal_fg, cl->normal_bg);
         ui_draw_box(ui, col1, row1, col2, row2, title);
 
         for (int i = 0; i < vis_rows; i++) {
@@ -959,31 +1022,40 @@ void photon_ui_showbuf(photon_ui_t *ui,
         }
 
         photon_sdl_present(ui->sdl);
+        redraw = false;
+        }
 
         photon_key_t key = {0};
-        if (!photon_sdl_wait_key(ui->sdl, &key, 100)) continue;
+        if (!photon_sdl_wait_key(ui->sdl, &key, 100)) {
+            if (photon_sdl_take_expose(ui->sdl))
+                redraw = true;
+            continue;
+        }
         if (key.code == 0) continue;
 
         switch (key.code) {
         case PHOTON_KEY_UP:
-            if (scroll > 0) scroll--;
+            if (scroll > 0) { scroll--; redraw = true; }
             break;
         case PHOTON_KEY_DOWN:
-            if (scroll + vis_rows < n_lines) scroll++;
+            if (scroll + vis_rows < n_lines) { scroll++; redraw = true; }
             break;
         case PHOTON_KEY_PGUP:
             scroll -= vis_rows;
             if (scroll < 0) scroll = 0;
+            redraw = true;
             break;
         case PHOTON_KEY_PGDN:
             scroll += vis_rows;
             if (scroll + vis_rows > n_lines) scroll = n_lines - vis_rows;
             if (scroll < 0) scroll = 0;
+            redraw = true;
             break;
-        case PHOTON_KEY_HOME: scroll = 0; break;
+        case PHOTON_KEY_HOME: scroll = 0; redraw = true; break;
         case PHOTON_KEY_END:
             scroll = n_lines - vis_rows;
             if (scroll < 0) scroll = 0;
+            redraw = true;
             break;
         case 27:
         case PHOTON_KEY_QUIT:
@@ -996,6 +1068,7 @@ void photon_ui_showbuf(photon_ui_t *ui,
     }
 
 done:
+    photon_theme_pop_palette(ui->sdl, pal_buf);
     photon_ui_restore_screen(ui, saved);
     photon_ui_free_screen(saved);
     for (int i = 0; i < n_lines; i++) free(lines[i]);
@@ -1077,6 +1150,10 @@ void photon_ui_pop(photon_ui_t *ui, const char *msg)
     uint8_t fg = cl->title_fg;
     uint8_t bg = cl->border_bg;
 
+    /* Push theme palette so toast colors are consistent */
+    uint8_t pal_buf[768];
+    photon_theme_push_palette(ui->sdl, pal_buf);
+
     /* Draw toast: top border */
     ui_put_cell(ui, col1, row1, BOX_TL, fg, bg, 0);
     for (int c = col1+1; c < col2; c++)
@@ -1098,5 +1175,6 @@ void photon_ui_pop(photon_ui_t *ui, const char *msg)
         ui_put_cell(ui, c, row2, BOX_H, fg, bg, 0);
     ui_put_cell(ui, col2, row2, BOX_BR, fg, bg, 0);
 
+    photon_theme_pop_palette(ui->sdl, pal_buf);
     photon_sdl_present(ui->sdl);
 }

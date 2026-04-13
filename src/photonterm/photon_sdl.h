@@ -119,11 +119,18 @@ void photon_sdl_clear_rect(photon_sdl_t *ctx,
                            int col1, int row1, int col2, int row2,
                            uint8_t fg, uint8_t bg);
 
+/* Bulk fill: single SDL RenderFillRect + shadow update.
+ * Much faster than per-cell draw_cell for uniform space-filled regions. */
+void photon_sdl_fill_rect(photon_sdl_t *ctx,
+                          int col1, int row1, int col2, int row2,
+                          uint8_t fg, uint8_t bg);
+
 /* Flush pending draw calls to the screen. */
 void photon_sdl_present(photon_sdl_t *ctx);
 
 /* Force a full repaint from the VTE's cell grid. */
 void photon_sdl_repaint(photon_sdl_t *ctx, vte_t *vte);
+void photon_sdl_invalidate(photon_sdl_t *ctx);
 
 /* Show a "Connecting to <name> ..." splash on a blank screen. */
 void photon_sdl_show_connecting(photon_sdl_t *ctx, const char *bbs_name);
@@ -162,6 +169,11 @@ bool photon_sdl_quit_requested(const photon_sdl_t *ctx);
 /* Current grid dimensions (may change after a resize event). */
 int photon_sdl_cols(const photon_sdl_t *ctx);
 int photon_sdl_rows(const photon_sdl_t *ctx);
+
+/* Direct read-only access to the shadow buffer for bulk copy.
+ * Returns NULL if shadow is not allocated. */
+const vte_cell_t *photon_sdl_shadow_ptr(const photon_sdl_t *ctx);
+int photon_sdl_shadow_cols(const photon_sdl_t *ctx);
 
 /* Physical pixel size of one cell. */
 int photon_sdl_cell_width(const photon_sdl_t *ctx);

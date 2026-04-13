@@ -81,6 +81,15 @@ typedef void (*vte_title_cb)(vte_t *vte, const char *title, void *user);
  * play a sound.  May be NULL to suppress the bell entirely. */
 typedef void (*vte_bell_cb)(vte_t *vte, void *user);
 
+/* Callback invoked when the scroll region shifts by n lines.
+ * dir > 0 = scroll up (content moves up, blank lines appear at bottom).
+ * dir < 0 = scroll down (content moves down, blank lines appear at top).
+ * top/bot are 1-based row boundaries of the scroll region.
+ * If this callback is set AND returns true, the VTE skips the per-cell
+ * emit_cell() calls for the shifted rows (renderer handled the blit).
+ * If it returns false or is NULL, VTE falls back to per-cell redraws. */
+typedef bool (*vte_scroll_cb)(vte_t *vte, int top, int bot, int n, int dir, void *user);
+
 typedef struct {
     vte_draw_cb     draw;
     vte_cursor_cb   cursor;
@@ -88,6 +97,7 @@ typedef struct {
     vte_response_cb response;
     vte_title_cb    title;
     vte_bell_cb     bell;
+    vte_scroll_cb   scroll;
     void           *user;
 } vte_callbacks_t;
 
@@ -122,6 +132,7 @@ bool   vte_cursor_visible(const vte_t *vte);
 /* Read a cell from the current screen (1-based col/row).
  * Returns false if out of range. */
 bool   vte_get_cell(const vte_t *vte, int col, int row, vte_cell_t *out);
+const vte_cell_t *vte_screen_ptr(const vte_t *vte);
 
 /* Grid dimensions. */
 int    vte_cols(const vte_t *vte);
