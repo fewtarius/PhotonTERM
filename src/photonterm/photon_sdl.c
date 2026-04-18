@@ -1428,6 +1428,14 @@ static void vte_cb_cursor(vte_t *vte, int col, int row, void *user)
 {
     (void)vte;
     photon_sdl_t *ctx = (photon_sdl_t *)user;
+    /* Invalidate the OLD cursor position in the shadow buffer so it gets
+     * redrawn without cursor on the next repaint. */
+    if (ctx->cur_visible && ctx->cur_col >= 1 && ctx->cur_row >= 1 &&
+        ctx->shadow && ctx->cur_col <= ctx->shadow_cols &&
+        ctx->cur_row <= ctx->shadow_rows) {
+        ctx->shadow[(ctx->cur_row - 1) * ctx->shadow_cols + (ctx->cur_col - 1)]
+            = (vte_cell_t){0};
+    }
     ctx->cur_col = col;
     ctx->cur_row = row;
 }

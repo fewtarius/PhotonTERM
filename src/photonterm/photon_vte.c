@@ -938,6 +938,7 @@ static void execute(vte_t *v, uint8_t byte)
     case 0x0D: /* CR */
         v->cx = 1;
         v->pending_wrap = false;
+        emit_cursor(v);
         break;
     case 0x07: /* BEL - ignore (no beep in VTE, caller can add) */
         if (v->cb.bell) v->cb.bell(v, v->cb.user);
