@@ -970,6 +970,18 @@ void photon_sdl_draw_cell(photon_sdl_t *ctx, int col, int row,
         ctx->pal_dirty = false;
     }
 
+    /* Clean up cursor at this position before drawing the cell.
+     * Erase the underline from the previous cursor state if needed. */
+    if (ctx->cur_visible && col == ctx->cur_col && row == ctx->cur_row) {
+        SDL_Rect dst = cell_rect(ctx, col, row);
+        /* Draw over the cursor line with the cell's background color */
+        SDL_Color bgc = pal_color(ctx, cell->bg);
+        SDL_SetRenderDrawColor(ctx->ren, bgc.r, bgc.g, bgc.b, 255);
+        SDL_RenderDrawLine(ctx->ren,
+            dst.x, dst.y + ctx->cell_h - 2,
+            dst.x + ctx->cell_w - 1, dst.y + ctx->cell_h - 2);
+    }
+
     /* Skip draw if shadow buffer already matches (avoids redundant SDL calls) */
     if (ctx->shadow && col <= ctx->shadow_cols && row <= ctx->shadow_rows) {
         vte_cell_t *sh = &ctx->shadow[(row - 1) * ctx->shadow_cols + (col - 1)];
