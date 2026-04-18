@@ -131,6 +131,7 @@ void photon_sdl_present(photon_sdl_t *ctx);
 /* Force a full repaint from the VTE's cell grid. */
 void photon_sdl_repaint(photon_sdl_t *ctx, vte_t *vte);
 void photon_sdl_invalidate(photon_sdl_t *ctx);
+void photon_sdl_invalidate_range(photon_sdl_t *ctx, int r0, int r1);
 
 /* Show a "Connecting to <name> ..." splash on a blank screen. */
 void photon_sdl_show_connecting(photon_sdl_t *ctx, const char *bbs_name);
@@ -234,6 +235,10 @@ void photon_sdl_restore_palette(photon_sdl_t *ctx, const uint8_t buf[768]);
  * Returns false if no selection is active. */
 bool photon_sdl_get_selection(const photon_sdl_t *ctx,
                                int *c0, int *r0, int *c1, int *r1);
+/* Mouse text selection helpers (also used by scrollback viewer) */
+void photon_sdl_start_selection(photon_sdl_t *ctx, int col, int row);
+void photon_sdl_update_selection(photon_sdl_t *ctx, int col, int row);
+bool photon_sdl_end_selection(photon_sdl_t *ctx, int col, int row);
 void photon_sdl_clear_selection(photon_sdl_t *ctx);
 bool photon_sdl_sel_active(const photon_sdl_t *ctx);  /* true while mouse dragging */
 

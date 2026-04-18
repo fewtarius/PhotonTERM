@@ -891,9 +891,57 @@ bool photon_sdl_get_selection(const photon_sdl_t *ctx,
     return true;
 }
 
+/* Begin a new mouse text selection (sets start anchor).  After this, callers
+ * should call photon_sdl_update_selection() on MOTION and
+ * photon_sdl_end_selection() on MOUSEUP. */
+void photon_sdl_start_selection(photon_sdl_t *ctx, int col, int row)
+{
+    if (!ctx) return;
+    ctx->sel_active     = true;
+    ctx->sel_have       = false;
+    ctx->sel_start_col  = ctx->sel_end_col = col;
+    ctx->sel_start_row  = ctx->sel_end_row = row;
+}
+
+/* Extend the live selection to a new endpoint while dragging. */
+void photon_sdl_update_selection(photon_sdl_t *ctx, int col, int row)
+{
+    if (!ctx || !ctx->sel_active) return;
+    ctx->sel_end_col = col;
+    ctx->sel_end_row = row;
+    ctx->sel_have    = true;
+}
+
+/* Finalize a mouse selection.  col/row is the release point.  Returns true if
+ * a non-empty selection was made (sets PHOTON_KEY_COPY_SEL). */
+bool photon_sdl_end_selection(photon_sdl_t *ctx, int col, int row)
+{
+    if (!ctx || !ctx->sel_active) return false;
+    ctx->sel_active = false;
+    ctx->sel_end_col = col;
+    ctx->sel_end_row = row;
+    /* Treat a single-cell click with no movement as a deselect */
+    if (ctx->sel_start_col == col && ctx->sel_start_row == row) {
+        ctx->sel_have = false;
+        return false;
+    }
+    ctx->sel_have = true;
+    photon_key_t k = { .code = PHOTON_KEY_COPY_SEL };
+    kq_push(&ctx->keys, k);
+    return true;
+}
+
 void photon_sdl_clear_selection(photon_sdl_t *ctx)
 {
     if (!ctx) return;
+    PHOTON_DBG("clear_selection: sel_have=%d sel_active=%d -> cleared",
+        ctx->sel_have, ctx->sel_active);
+    if (ctx->sel_have && ctx->shadow) {
+        /* Erase highlight by forcing those shadow cells to compare dirty. */
+        int r0 = ctx->sel_start_row < ctx->sel_end_row ? ctx->sel_start_row : ctx->sel_end_row;
+        int r1 = ctx->sel_start_row > ctx->sel_end_row ? ctx->sel_start_row : ctx->sel_end_row;
+        photon_sdl_invalidate_range(ctx, r0, r1);
+    }
     ctx->sel_have   = false;
     ctx->sel_active = false;
 }
@@ -1355,6 +1403,22 @@ void photon_sdl_invalidate(photon_sdl_t *ctx)
                (size_t)ctx->shadow_cols * ctx->shadow_rows * sizeof(vte_cell_t));
 }
 
+/* Invalidate a row range in the shadow buffer so those cells redraw on the
+ * next repaint.  r0/r1 are 0-based inclusive row indices.  Useful for
+ * selectively erasing stale overlays (e.g. selection highlight) without
+ * redrawing the entire screen. */
+void photon_sdl_invalidate_range(photon_sdl_t *ctx, int r0, int r1)
+{
+    if (!ctx || !ctx->shadow || ctx->shadow_cols == 0 || ctx->shadow_rows == 0)
+        return;
+    if (r0 < 0) r0 = 0;
+    if (r1 >= ctx->shadow_rows) r1 = ctx->shadow_rows - 1;
+    if (r0 > r1) return;
+    for (int r = r0; r <= r1; r++)
+        memset(&ctx->shadow[r * ctx->shadow_cols], 0,
+               (size_t)ctx->shadow_cols * sizeof(vte_cell_t));
+}
+
 void photon_sdl_repaint_shadow(photon_sdl_t *ctx)
 {
     if (!ctx || !ctx->shadow) return;
@@ -1563,19 +1627,26 @@ static void translate_sdl_event(photon_sdl_t *ctx, const SDL_Event *ev)
 
     /* Mouse events for text selection */
     if (ev->type == SDL_MOUSEBUTTONDOWN && ev->button.button == SDL_BUTTON_LEFT) {
-        /* Clear any prior selection and start a new drag */
-        ctx->sel_have   = false;
+        PHOTON_DBG("mouse: MOUSEDOWN x=%d y=%d cell_w=%d cell_h=%d cols=%d rows=%d",
+            ev->button.x, ev->button.y, ctx->cell_w, ctx->cell_h, ctx->cols, ctx->rows);
         ctx->sel_active = true;
+        ctx->sel_have   = false;  /* erase any stale highlight; new drag has no highlight yet */
         int col = ev->button.x / ctx->cell_w;
         int row = ev->button.y / ctx->cell_h;
         if (col >= ctx->cols) col = ctx->cols - 1;
         if (row >= ctx->rows) row = ctx->rows - 1;
+        PHOTON_DBG("mouse: start selection col=%d row=%d", col, row);
         ctx->sel_start_col = ctx->sel_end_col = col;
         ctx->sel_start_row = ctx->sel_end_row = row;
         return;
     }
 
-    if (ev->type == SDL_MOUSEMOTION && ctx->sel_active) {
+    if (ev->type == SDL_MOUSEMOTION) {
+        if (!ctx->sel_active) {
+            PHOTON_DBG("mouse: MOTION but sel_active=FALSE (dropped)");
+            return;
+        }
+        PHOTON_DBG("mouse: MOTION x=%d y=%d", ev->motion.x, ev->motion.y);
         int col = ev->motion.x / ctx->cell_w;
         int row = ev->motion.y / ctx->cell_h;
         if (col < 0) col = 0;
@@ -1588,26 +1659,29 @@ static void translate_sdl_event(photon_sdl_t *ctx, const SDL_Event *ev)
         return;
     }
 
-    if (ev->type == SDL_MOUSEBUTTONUP && ev->button.button == SDL_BUTTON_LEFT
-            && ctx->sel_active) {
-        ctx->sel_active = false;
-        int col = ev->button.x / ctx->cell_w;
-        int row = ev->button.y / ctx->cell_h;
-        if (col < 0) col = 0;
-        if (row < 0) row = 0;
-        if (col >= ctx->cols) col = ctx->cols - 1;
-        if (row >= ctx->rows) row = ctx->rows - 1;
-        ctx->sel_end_col = col;
-        ctx->sel_end_row = row;
-        /* Treat a single-cell click with no movement as a deselect */
-        if (ctx->sel_start_col == col && ctx->sel_start_row == row)
-            ctx->sel_have = false;
-        else
-            ctx->sel_have = true;
-        /* Signal: push a special key so term loop can copy selection */
-        if (ctx->sel_have) {
-            photon_key_t k = { .code = PHOTON_KEY_COPY_SEL };
-            kq_push(&ctx->keys, k);
+    if (ev->type == SDL_MOUSEBUTTONUP) {
+        PHOTON_DBG("mouse: MOUSEUP button=%d x=%d y=%d sel_active=%d",
+            ev->button.button, ev->button.x, ev->button.y, ctx->sel_active);
+        if (ev->button.button == SDL_BUTTON_LEFT && ctx->sel_active) {
+            ctx->sel_active = false;
+            int col = ev->button.x / ctx->cell_w;
+            int row = ev->button.y / ctx->cell_h;
+            if (col < 0) col = 0;
+            if (row < 0) row = 0;
+            if (col >= ctx->cols) col = ctx->cols - 1;
+            if (row >= ctx->rows) row = ctx->rows - 1;
+            ctx->sel_end_col = col;
+            ctx->sel_end_row = row;
+            /* Treat a single-cell click with no movement as a deselect */
+            if (ctx->sel_start_col == col && ctx->sel_start_row == row)
+                ctx->sel_have = false;
+            else
+                ctx->sel_have = true;
+            /* Signal: push a special key so term loop can copy selection */
+            if (ctx->sel_have) {
+                photon_key_t k = { .code = PHOTON_KEY_COPY_SEL };
+                kq_push(&ctx->keys, k);
+            }
         }
         return;
     }
@@ -1629,7 +1703,8 @@ static void translate_sdl_event(photon_sdl_t *ctx, const SDL_Event *ev)
         return;
     }
 
-    if (ev->type != SDL_KEYDOWN) return;
+    if (ev->type != SDL_KEYDOWN)
+        return;
 
     SDL_Keycode sym = ev->key.keysym.sym;
     int mod = 0;

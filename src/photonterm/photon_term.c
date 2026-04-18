@@ -503,12 +503,6 @@ static void run_scrollback_viewer(vte_t *vte, photon_sdl_t *sdl)
     bool redraw = true;
     bool done   = false;
 
-    /* Mouse selection state (viewport-relative, 0-based) */
-    bool sel_dragging = false;
-    bool sel_have     = false;
-    int  sel_sc = 0, sel_sr = 0;   /* start col/row */
-    int  sel_ec = 0, sel_er = 0;   /* end col/row */
-
     /* Status bar colours (bright white on blue, bold) */
     vte_cell_t sb_bar_bg = { ' ', 15, 4, VTE_ATTR_BOLD };
     vte_cell_t blank = { ' ', VTE_COLOR_DEFAULT_FG, VTE_COLOR_DEFAULT_BG, 0 };
@@ -546,14 +540,10 @@ static void run_scrollback_viewer(vte_t *vte, photon_sdl_t *sdl)
             }
 
             /* Draw selection highlight overlay */
-            if (sel_have || sel_dragging) {
-                int r0 = sel_sr, c0 = sel_sc, r1 = sel_er, c1 = sel_ec;
-                /* Normalize */
-                if (r0 > r1 || (r0 == r1 && c0 > c1)) {
-                    int t = r0; r0 = r1; r1 = t;
-                    t = c0; c0 = c1; c1 = t;
-                }
-                photon_sdl_draw_selection(sdl, c0, r0, c1, r1, visible);
+            if (photon_sdl_sel_active(sdl) || photon_sdl_get_selection(sdl, NULL, NULL, NULL, NULL)) {
+                int c0, r0, c1, r1;
+                if (photon_sdl_get_selection(sdl, &c0, &r0, &c1, &r1))
+                    photon_sdl_draw_selection(sdl, c0, r0, c1, r1, visible);
             }
 
             /* Status bar on bottom row */
@@ -594,54 +584,45 @@ static void run_scrollback_viewer(vte_t *vte, photon_sdl_t *sdl)
 
         /* Mouse button down: start selection */
         if (ev.type == SDL_MOUSEBUTTONDOWN && ev.button.button == SDL_BUTTON_LEFT) {
-            sel_have     = false;
-            sel_dragging = true;
             int mc = ev.button.x / cell_w;
             int mr = ev.button.y / cell_h;
             if (mc < 0) mc = 0;
             if (mr < 0) mr = 0;
             if (mc >= cols) mc = cols - 1;
             if (mr >= visible) mr = visible - 1;
-            sel_sc = sel_ec = mc;
-            sel_sr = sel_er = mr;
+            photon_sdl_start_selection(sdl, mc, mr);
             redraw = true;
             continue;
         }
 
         /* Mouse drag: extend selection */
-        if (ev.type == SDL_MOUSEMOTION && sel_dragging) {
+        if (ev.type == SDL_MOUSEMOTION && photon_sdl_sel_active(sdl)) {
             int mc = ev.motion.x / cell_w;
             int mr = ev.motion.y / cell_h;
             if (mc < 0) mc = 0;
             if (mr < 0) mr = 0;
             if (mc >= cols) mc = cols - 1;
             if (mr >= visible) mr = visible - 1;
-            sel_ec = mc;
-            sel_er = mr;
-            sel_have = true;
+            photon_sdl_update_selection(sdl, mc, mr);
             redraw = true;
             continue;
         }
 
         /* Mouse button up: finalize selection and copy */
-        if (ev.type == SDL_MOUSEBUTTONUP && ev.button.button == SDL_BUTTON_LEFT
-                && sel_dragging) {
-            sel_dragging = false;
+        if (ev.type == SDL_MOUSEBUTTONUP && ev.button.button == SDL_BUTTON_LEFT) {
             int mc = ev.button.x / cell_w;
             int mr = ev.button.y / cell_h;
             if (mc < 0) mc = 0;
             if (mr < 0) mr = 0;
             if (mc >= cols) mc = cols - 1;
             if (mr >= visible) mr = visible - 1;
-            sel_ec = mc;
-            sel_er = mr;
-            /* Single-cell click with no movement = deselect */
-            if (sel_sc == mc && sel_sr == mr) {
-                sel_have = false;
-            } else {
-                sel_have = true;
-                sb_copy_selection(vte, sdl, sel_sc, sel_sr, sel_ec, sel_er,
-                                  scroll_top, sb_lines, cols);
+            bool ok = photon_sdl_end_selection(sdl, mc, mr);
+            if (ok) {
+                int sc, sr, ec, er;
+                if (photon_sdl_get_selection(sdl, &sc, &sr, &ec, &er)) {
+                    sb_copy_selection(vte, sdl, sc, sr, ec, er,
+                                      scroll_top, sb_lines, cols);
+                }
             }
             redraw = true;
             continue;
@@ -919,6 +900,13 @@ photon_term_result_t photon_doterm(vte_t *vte, photon_sdl_t *sdl,
              * on low-spec hardware (e.g. 8th-gen Intel iGPU). */
             if (dirty || got_data || sel_live || (t - last_render) >= 500) {
                 photon_sdl_repaint(sdl, vte);
+                if (photon_sdl_sel_active(sdl) || photon_sdl_get_selection(sdl, NULL, NULL, NULL, NULL)) {
+                    int c0, r0, c1, r1;
+                    if (photon_sdl_get_selection(sdl, &c0, &r0, &c1, &r1)) {
+                        int rows = photon_sdl_rows(sdl);
+                        photon_sdl_draw_selection(sdl, c0, r0, c1, r1, rows);
+                    }
+                }
                 if (alt_held && tabbar && tabbar->ntabs > 1)
                     draw_alt_overlay(sdl, tabbar);
                 if (s_render_overlay_fn)
