@@ -22,6 +22,11 @@ static void
 photonterm_early_init(void)
 {
 	setenv("SDL_NO_SIGNAL_HANDLERS", "1", 1);
+	/* Prevent Steam Runtime ld.so.preload from injecting 32-bit libraries.
+	 * Steam Deck GameMode runs a 32-bit ld.so.preload that causes
+	 * "ERROR: ld.so: wrong ELF class: ELFCLASS32" with our 64-bit binary.
+	 * Clearing LD_PRELOAD avoids this without affecting normal Steam launch. */
+	unsetenv("LD_PRELOAD");
 	signal(SIGINT,  SIG_IGN);
 	signal(SIGTERM, SIG_IGN);
 	signal(SIGHUP,  SIG_IGN);

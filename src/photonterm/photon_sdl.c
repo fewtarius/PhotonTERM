@@ -1171,12 +1171,20 @@ void photon_sdl_draw_cursor(photon_sdl_t *ctx, int col, int row,
 
     if (!ctx->cur_blink_on) return;
 
-    /* Draw a block cursor using inverted palette entry 7 */
+    /* Draw an underline cursor at the bottom of the cell */
     SDL_Rect dst = cell_rect(ctx, col, row);
-    SDL_SetRenderDrawBlendMode(ctx->ren, SDL_BLENDMODE_BLEND);
-    SDL_SetRenderDrawColor(ctx->ren, 170, 170, 170, 160);
-    SDL_RenderFillRect(ctx->ren, &dst);
-    SDL_SetRenderDrawBlendMode(ctx->ren, SDL_BLENDMODE_NONE);
+    SDL_Color cur_fg;
+    if (cell && (cell->attr & VTE_ATTR_FG_RGB)) {
+        cur_fg.r = (cell->fg_rgb >> 16) & 0xFF;
+        cur_fg.g = (cell->fg_rgb >>  8) & 0xFF;
+        cur_fg.b =  cell->fg_rgb        & 0xFF;
+    } else {
+        cur_fg = pal_color(ctx, cell ? cell->fg : 7);  /* default white */
+    }
+    SDL_SetRenderDrawColor(ctx->ren, cur_fg.r, cur_fg.g, cur_fg.b, 255);
+    SDL_RenderDrawLine(ctx->ren,
+        dst.x, dst.y + ctx->cell_h - 2,
+        dst.x + ctx->cell_w - 1, dst.y + ctx->cell_h - 2);
 }
 
 /* ── Clear rect ─────────────────────────────────────────────────────── */
