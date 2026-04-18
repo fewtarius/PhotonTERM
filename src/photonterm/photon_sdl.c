@@ -975,7 +975,14 @@ void photon_sdl_draw_cell(photon_sdl_t *ctx, int col, int row,
     if (ctx->cur_visible && col == ctx->cur_col && row == ctx->cur_row) {
         SDL_Rect dst = cell_rect(ctx, col, row);
         /* Draw over the cursor line with the cell's background color */
-        SDL_Color bgc = pal_color(ctx, cell->bg);
+        SDL_Color bgc;
+        if (cell->attr & VTE_ATTR_BG_RGB) {
+            bgc.r = (uint8_t)((cell->bg_rgb >> 16) & 0xFF);
+            bgc.g = (uint8_t)((cell->bg_rgb >>  8) & 0xFF);
+            bgc.b = (uint8_t)( cell->bg_rgb        & 0xFF);
+        } else {
+            bgc = pal_color(ctx, cell->bg);
+        }
         SDL_SetRenderDrawColor(ctx->ren, bgc.r, bgc.g, bgc.b, 255);
         SDL_RenderDrawLine(ctx->ren,
             dst.x, dst.y + ctx->cell_h - 2,
@@ -1644,10 +1651,12 @@ static void translate_sdl_event(photon_sdl_t *ctx, const SDL_Event *ev)
             if (nr < 1) nr = 1;
             ctx->cols = nc;
             ctx->rows = nr;
-            ctx->shadow = realloc(ctx->shadow, (size_t)(nc * nr) * sizeof(vte_cell_t));
+            vte_cell_t *new_shadow = realloc(ctx->shadow, (size_t)(nc * nr) * sizeof(vte_cell_t));
+            if (!new_shadow) return;  /* safest: abort resize, keep old dims */
+            ctx->shadow = new_shadow;
+            memset(ctx->shadow, 0, (size_t)(nc * nr) * sizeof(vte_cell_t));
             ctx->shadow_cols = nc;
             ctx->shadow_rows = nr;
-            for (int i = 0; i < nc * nr; i++) ctx->shadow[i] = (vte_cell_t){0};
             /* Recreate render target texture for new window size */
             if (ctx->texture) {
                 SDL_DestroyTexture(ctx->texture);

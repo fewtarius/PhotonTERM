@@ -239,10 +239,11 @@ static void sb_push_line(vte_t *v, const vte_cell_t *row_cells)
     if (v->sb_cap == 0)
         return;
     sb_line_t *sl = &v->sb_lines[v->sb_head];
-    /* (re)allocate if columns changed */
+    /* (re)allocate for current column count */
     if (sl->cols != v->cols) {
         free(sl->cells);
         sl->cells = malloc(sizeof(vte_cell_t) * (size_t)v->cols);
+        if (!sl->cells) { sl->cols = 0; return; }
         sl->cols  = v->cols;
     }
     if (sl->cells)
@@ -252,7 +253,42 @@ static void sb_push_line(vte_t *v, const vte_cell_t *row_cells)
         v->sb_count++;
 }
 
-/* ── Screen operations ─────────────────────────────────────────────────── */
+/* Free all scrollback line cells */
+static void sb_free_all(vte_t *v)
+{
+    if (!v->sb_lines) return;
+    for (int i = 0; i < v->sb_cap; i++) {
+        free(v->sb_lines[i].cells);
+        v->sb_lines[i].cells = NULL;
+        v->sb_lines[i].cols  = 0;
+    }
+    free(v->sb_lines);
+    v->sb_lines  = NULL;
+    v->sb_cap    = 0;
+    v->sb_count  = 0;
+    v->sb_head   = 0;
+}
+
+/* Reallocate scrollback for a new column count (preserves existing lines) */
+static void sb_resize(vte_t *v, int new_cols)
+{
+    if (!v->sb_lines || new_cols <= 0) return;
+    for (int i = 0; i < v->sb_cap; i++) {
+        sb_line_t *sl = &v->sb_lines[i];
+        if (!sl->cells) continue;
+        vte_cell_t *nc = realloc(sl->cells, sizeof(vte_cell_t) * (size_t)new_cols);
+        if (!nc) { sb_free_all(v); return; }  /* bail out safely */
+        sl->cells = nc;
+        if (sl->cols < new_cols) {
+            vte_cell_t blank = blank_cell(v);
+            for (int c = sl->cols; c < new_cols; c++)
+                nc[c] = blank;
+        }
+        sl->cols = new_cols;
+    }
+}
+
+
 
 /* Fill range of cells with blank (does NOT emit callbacks). */
 static void clear_cells_quiet(vte_t *v, int col1, int row1, int col2, int row2)
@@ -1271,6 +1307,9 @@ void vte_resize(vte_t *v, int cols, int rows)
 
     vte_cell_t *ns = calloc((size_t)(cols * rows), sizeof(vte_cell_t));
     if (!ns) return;
+
+    /* Resize scrollback line buffers to match new column count */
+    sb_resize(v, cols);
 
     /* Fill new buffer with blanks, then copy old content */
     vte_cell_t blank = blank_cell(v);
