@@ -898,7 +898,7 @@ photon_term_result_t photon_doterm(vte_t *vte, photon_sdl_t *sdl,
              * Safety-net refresh every 500ms handles edge cases (window
              * expose without SDL event, etc.) while staying idle-friendly
              * on low-spec hardware (e.g. 8th-gen Intel iGPU). */
-            if (dirty || got_data || sel_live || (t - last_render) >= 500) {
+            if (dirty || got_data || sel_live || (t - last_render) >= FRAME_MS) {
                 photon_sdl_repaint(sdl, vte);
                 if (photon_sdl_sel_active(sdl) || photon_sdl_get_selection(sdl, NULL, NULL, NULL, NULL)) {
                     int c0, r0, c1, r1;

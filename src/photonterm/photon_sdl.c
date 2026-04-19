@@ -1714,40 +1714,33 @@ static void translate_sdl_event(photon_sdl_t *ctx, const SDL_Event *ev)
     if (km & KMOD_ALT)    mod |= PHOTON_MOD_ALT;
     if (km & KMOD_GUI)    mod |= PHOTON_MOD_META;
 
-    /* Alt-Enter: toggle fullscreen */
+    /* Alt-Enter: toggle fullscreen.
+     * Use SDL_WINDOW_FULLSCREEN (not DESKTOP) so the window actually resizes
+     * to the display resolution - this lets the grid expand to fill the screen.
+     * SDL_WINDOW_FULLSCREEN_DESKTOP would scale the windowed content in place,
+     * leaving cols/rows unchanged (visual scale ≠ grid resize). */
     if ((mod & PHOTON_MOD_ALT) && (sym == SDLK_RETURN || sym == SDLK_KP_ENTER)) {
         Uint32 flags = SDL_GetWindowFlags(ctx->win);
-        if (flags & SDL_WINDOW_FULLSCREEN_DESKTOP)
+        if (flags & SDL_WINDOW_FULLSCREEN) {
             SDL_SetWindowFullscreen(ctx->win, 0);
-        else
-            SDL_SetWindowFullscreen(ctx->win, SDL_WINDOW_FULLSCREEN_DESKTOP);
-        /* Force immediate resize processing so ui_grid_cols/rows reflect the
-         * new fullscreen grid on the very next frame. */
-        int w, h;
-        SDL_GetWindowSize(ctx->win, &w, &h);
-        ctx->win_w = w;
-        ctx->win_h = h;
+        } else {
+            SDL_SetWindowFullscreen(ctx->win, SDL_WINDOW_FULLSCREEN);
+        }
+        /* The SDL_WINDOWEVENT_RESIZED handler below will fire asynchronously
+         * after the compositor applies the new size.  Set resize_pending so the
+         * consumer (photon_doterm) picks up the new grid and notifies the VTE
+         * and remote.  We also update our cached logical size immediately so
+         * synchronous consumers (e.g. the tab bar) see correct dimensions. */
+        ctx->resize_pending = true;
+        SDL_GetWindowSize(ctx->win, &ctx->win_w, &ctx->win_h);
         if (ctx->cell_w > 0 && ctx->cell_h > 0) {
-            int nc = w / ctx->cell_w;
-            int nr = h / ctx->cell_h;
+            int nc = ctx->win_w / ctx->cell_w;
+            int nr = ctx->win_h / ctx->cell_h;
             if (nc < 1) nc = 1;
             if (nr < 1) nr = 1;
-            ctx->cols = nc;
-            ctx->rows = nr;
-            vte_cell_t *new_shadow = realloc(ctx->shadow, (size_t)(nc * nr) * sizeof(vte_cell_t));
-            if (!new_shadow) return;  /* safest: abort resize, keep old dims */
-            ctx->shadow = new_shadow;
-            memset(ctx->shadow, 0, (size_t)(nc * nr) * sizeof(vte_cell_t));
-            ctx->shadow_cols = nc;
-            ctx->shadow_rows = nr;
-            /* Recreate render target texture for new window size */
-            if (ctx->texture) {
-                SDL_DestroyTexture(ctx->texture);
-                ctx->texture = make_texture(ctx->ren, w, h);
-                SDL_SetRenderTarget(ctx->ren, ctx->texture);
-            }
+            ctx->pending_cols = nc;
+            ctx->pending_rows = nr;
         }
-        ctx->resize_pending = false;
         return;
     }
 
