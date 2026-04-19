@@ -1320,6 +1320,21 @@ void photon_sdl_fill_rect(photon_sdl_t *ctx,
     }
 }
 
+/* ── Clear ───────────────────────────────────────────────────────────── */
+
+/* Clear the render target to black and show it on screen immediately.
+ * Erases any stale content (e.g. leftover pixels from a previous tab)
+ * so the next repaint starts from a clean slate. */
+void photon_sdl_clear(photon_sdl_t *ctx)
+{
+    if (!ctx) return;
+    SDL_SetRenderTarget(ctx->ren, NULL);
+    SDL_SetRenderDrawColor(ctx->ren, 0, 0, 0, 255);
+    SDL_RenderClear(ctx->ren);
+    SDL_RenderPresent(ctx->ren);
+    SDL_SetRenderTarget(ctx->ren, ctx->texture);
+}
+
 /* ── Present ────────────────────────────────────────────────────────── */
 
 void photon_sdl_present(photon_sdl_t *ctx)
@@ -1726,21 +1741,29 @@ static void translate_sdl_event(photon_sdl_t *ctx, const SDL_Event *ev)
         } else {
             SDL_SetWindowFullscreen(ctx->win, SDL_WINDOW_FULLSCREEN);
         }
-        /* The SDL_WINDOWEVENT_RESIZED handler below will fire asynchronously
-         * after the compositor applies the new size.  Set resize_pending so the
-         * consumer (photon_doterm) picks up the new grid and notifies the VTE
-         * and remote.  We also update our cached logical size immediately so
-         * synchronous consumers (e.g. the tab bar) see correct dimensions. */
-        ctx->resize_pending = true;
-        SDL_GetWindowSize(ctx->win, &ctx->win_w, &ctx->win_h);
+        /* On Wayland, SDL_GetWindowSize may lag behind the compositor.
+         * Use SDL_GetRendererOutputSize to get the committed physical size
+         * immediately after the fullscreen transition. */
+        int win_w, win_h, draw_w, draw_h;
+        SDL_GetRendererOutputSize(ctx->ren, &draw_w, &draw_h);
+        SDL_GetWindowSize(ctx->win, &win_w, &win_h);
+        /* Use the larger of logical and physical so we fill the screen. */
+        if (win_w < draw_w) win_w = draw_w;
+        if (win_h < draw_h) win_h = draw_h;
+        ctx->win_w = win_w;
+        ctx->win_h = win_h;
+        ctx->draw_w = draw_w;
+        ctx->draw_h = draw_h;
+        ctx->retina_scale = (win_w > 0) ? (float)draw_w / (float)win_w : 1.0f;
         if (ctx->cell_w > 0 && ctx->cell_h > 0) {
-            int nc = ctx->win_w / ctx->cell_w;
-            int nr = ctx->win_h / ctx->cell_h;
+            int nc = win_w / ctx->cell_w;
+            int nr = win_h / ctx->cell_h;
             if (nc < 1) nc = 1;
             if (nr < 1) nr = 1;
             ctx->pending_cols = nc;
             ctx->pending_rows = nr;
         }
+        ctx->resize_pending = true;
         return;
     }
 
@@ -1962,8 +1985,22 @@ bool photon_sdl_check_resize(photon_sdl_t *ctx, int *nc, int *nr)
 
     ctx->cols  = new_cols;
     ctx->rows  = new_rows;
-    ctx->win_w = new_cols * ctx->cell_w;
-    ctx->win_h = new_rows * ctx->cell_h;
+
+    /* Query the actual renderer output size (correct on Wayland even before
+     * the compositor has animated the window resize after fullscreen toggle). */
+    int draw_w, draw_h;
+    SDL_GetRendererOutputSize(ctx->ren, &draw_w, &draw_h);
+    int log_w = draw_w, log_h = draw_h;
+    SDL_GetWindowSize(ctx->win, &log_w, &log_h);
+    /* Use the larger of logical and physical so we fill the screen. */
+    if (log_w < draw_w) log_w = draw_w;
+    if (log_h < draw_h) log_h = draw_h;
+
+    ctx->win_w = log_w;
+    ctx->win_h = log_h;
+    ctx->draw_w = draw_w;
+    ctx->draw_h = draw_h;
+    ctx->retina_scale = (log_w > 0) ? (float)draw_w / (float)log_w : 1.0f;
 
     /* Reallocate shadow buffer */
     free(ctx->shadow);
@@ -1974,7 +2011,7 @@ bool photon_sdl_check_resize(photon_sdl_t *ctx, int *nc, int *nr)
     /* Recreate render target texture for new window size */
     if (ctx->texture) {
         SDL_DestroyTexture(ctx->texture);
-        ctx->texture = make_texture(ctx->ren, ctx->win_w, ctx->win_h);
+        ctx->texture = make_texture(ctx->ren, log_w, log_h);
         SDL_SetRenderTarget(ctx->ren, ctx->texture);
     }
 

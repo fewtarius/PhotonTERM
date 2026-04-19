@@ -242,6 +242,10 @@ bool photon_sdl_end_selection(photon_sdl_t *ctx, int col, int row);
 void photon_sdl_clear_selection(photon_sdl_t *ctx);
 bool photon_sdl_sel_active(const photon_sdl_t *ctx);  /* true while mouse dragging */
 
+/* Clear the render target texture to black and present it to the screen.
+ * Used to erase stale content (e.g. between tab switches before repaint). */
+void photon_sdl_clear(photon_sdl_t *ctx);
+
 /* Draw a selection highlight overlay on already-rendered cells.
  * Coords are 0-based viewport col/row (normalized: start <= end).
  * visible_rows excludes the status bar row. */

@@ -204,6 +204,16 @@ static void switch_tab(photon_sdl_t *sdl, photon_settings_t *settings,
         photon_sdl_apply_palette_mode(sdl, pm, bbs->conn_type);
     }
 
+    /* Clear the render target to black so no content from the old tab bleeds
+     * through on the new tab (new tab may have fewer cells filled).
+     * photon_sdl_clear() shows the black frame immediately, then invalidate
+     * so the next repaint overwrites everything from scratch. */
+    photon_sdl_clear(sdl);
+
+    /* Invalidate the shadow buffer so every cell of the new tab gets redrawn
+     * on the next repaint. */
+    photon_sdl_invalidate(sdl);
+
     /* Repaint from VTE buffer */
     vte_repaint(tabs[active_tab].vte);
     render_tab_bar(sdl);
