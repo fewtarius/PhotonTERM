@@ -468,6 +468,7 @@ static void run_terminal_mode(photon_ui_t *ui, photon_settings_t *s)
 static void run_terminal_size(photon_ui_t *ui, photon_settings_t *s)
 {
     const char *opts[] = {
+        "Auto (window size)",
         "80 x 24  (classic BBS)",
         "80 x 25  (standard)",
         "80 x 40  (tall)",
@@ -476,10 +477,10 @@ static void run_terminal_size(photon_ui_t *ui, photon_settings_t *s)
         "132 x 37  (wide)",
         NULL
     };
-    static const int col_tab[] = { 80,  80,  80, 100, 120, 132 };
-    static const int row_tab[] = { 24,  25,  40,  35,  35,  37 };
-    int n = 6;
-    int cur = 1; /* 80x25 default */
+    static const int col_tab[] = {  0,  80,  80,  80, 100, 120, 132 };
+    static const int row_tab[] = {  0,  24,  25,  40,  35,  35,  37 };
+    int n = 7;
+    int cur = 0; /* auto is now the default */
     for (int i = 0; i < n; i++) {
         if (col_tab[i] == s->cols && row_tab[i] == s->rows) { cur = i; break; }
     }
@@ -523,7 +524,10 @@ static void run_settings(photon_ui_t *ui, photon_settings_t *s)
             strlcpy(mode_val, "UTF-8 (Unicode)", sizeof(mode_val));
 
         snprintf(font_val, sizeof(font_val), "%dpt", s->ttf_size_pt);
-        snprintf(term_val, sizeof(term_val), "%d x %d", s->cols, s->rows);
+        if (s->cols == 0 && s->rows == 0)
+            strlcpy(term_val, "Auto (window)", sizeof(term_val));
+        else
+            snprintf(term_val, sizeof(term_val), "%d x %d", s->cols, s->rows);
 
         photon_menu_field_t fields[] = {
             { "Theme",         PHOTON_MENU_FIELD_ACTION, theme_val, sizeof(theme_val), NULL, NULL, NULL },

@@ -400,6 +400,16 @@ int main(int argc, char **argv)
         active_tab = slot;
         ntabs++;
 
+        /* Auto-detect: if settings.cols/rows are 0, use the current SDL window
+         * grid so the session starts at the window's actual size. */
+        if (settings.cols == 0 && settings.rows == 0) {
+            int nc = photon_sdl_cols(sdl);
+            int nr = photon_sdl_rows(sdl);
+            bbs->init_cols = nc;
+            bbs->init_rows = nr;
+            vte_resize(vte, nc, nr);
+        }
+
         PHOTON_DBG("tab %d: connecting to '%s' %s:%u type=%d",
                    slot, bbs->name, bbs->addr, bbs->port, bbs->conn_type);
 

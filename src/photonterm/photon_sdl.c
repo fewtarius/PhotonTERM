@@ -273,6 +273,13 @@ struct photon_sdl {
     int           pending_cols;
     int           pending_rows;
 
+    /* Saved windowed dimensions: captured when entering fullscreen so we can
+     * restore the correct logical size on exit (especially needed on Wayland,
+     * where SDL_GetWindowSize returns the fullscreen size briefly after
+     * exiting fullscreen, before the compositor sends the resize event). */
+    int           pre_fullscreen_win_w;
+    int           pre_fullscreen_win_h;
+
     /* Rendering mode.  When true, skip the CP437 bitmap atlas and render all
      * glyphs via TTF (Unicode/UTF-8 mode).  When false (default), use the
      * CP437 atlas for ASCII+CP437 chars and fall back to TTF for anything else. */
@@ -1624,6 +1631,13 @@ static void translate_sdl_event(photon_sdl_t *ctx, const SDL_Event *ev)
                 memset(ctx->shadow, 0,
                        (size_t)ctx->shadow_cols * ctx->shadow_rows * sizeof(vte_cell_t));
         }
+        if (ev->window.event == SDL_WINDOWEVENT_LEAVE) {
+            /* Mouse left the window while dragging - clear the selection so
+             * the highlight doesn't get stuck.  The button-up may have happened
+             * outside the window, in which case the MOUSEUP handler won't fire. */
+            if (ctx->sel_active)
+                photon_sdl_clear_selection(ctx);
+        }
         return;
     }
 
@@ -1737,13 +1751,26 @@ static void translate_sdl_event(photon_sdl_t *ctx, const SDL_Event *ev)
     if ((mod & PHOTON_MOD_ALT) && (sym == SDLK_RETURN || sym == SDLK_KP_ENTER)) {
         Uint32 flags = SDL_GetWindowFlags(ctx->win);
         if (flags & SDL_WINDOW_FULLSCREEN) {
+            /* Exiting fullscreen: restore the windowed size we saved on entry. */
             SDL_SetWindowFullscreen(ctx->win, 0);
+            if (ctx->pre_fullscreen_win_w > 0 && ctx->pre_fullscreen_win_h > 0) {
+                SDL_SetWindowSize(ctx->win,
+                                  ctx->pre_fullscreen_win_w,
+                                  ctx->pre_fullscreen_win_h);
+            }
         } else {
+            /* Entering fullscreen: save current windowed logical size first so we
+             * can restore it exactly on exit (especially important on Wayland,
+             * where SDL_GetWindowSize may briefly return the fullscreen resolution
+             * before the compositor sends the windowed resize event). */
+            SDL_GetWindowSize(ctx->win, &ctx->pre_fullscreen_win_w,
+                             &ctx->pre_fullscreen_win_h);
             SDL_SetWindowFullscreen(ctx->win, SDL_WINDOW_FULLSCREEN);
         }
-        /* On Wayland, SDL_GetWindowSize may lag behind the compositor.
-         * Use SDL_GetRendererOutputSize to get the committed physical size
-         * immediately after the fullscreen transition. */
+        /* Use SDL_GetRendererOutputSize for physical dimensions; these are
+         * reliable immediately after a fullscreen transition on both X11 and
+         * Wayland (they report the committed output size, not the logical
+         * window size which can lag on Wayland). */
         int win_w, win_h, draw_w, draw_h;
         SDL_GetRendererOutputSize(ctx->ren, &draw_w, &draw_h);
         SDL_GetWindowSize(ctx->win, &win_w, &win_h);
@@ -1764,6 +1791,23 @@ static void translate_sdl_event(photon_sdl_t *ctx, const SDL_Event *ev)
             ctx->pending_rows = nr;
         }
         ctx->resize_pending = true;
+        return;
+    }
+
+    /* Alt+Plus/Minus or Ctrl+Plus/Minus: change font size (local, not passed
+     * to the host).  Use the same hotkey on all platforms - the host never
+     * needs raw +/- anyway. */
+    if ((mod & (PHOTON_MOD_ALT | PHOTON_MOD_CTRL)) &&
+        (sym == SDLK_PLUS || sym == SDLK_KP_PLUS ||
+         sym == SDLK_MINUS || sym == SDLK_KP_MINUS ||
+         sym == SDLK_EQUALS)) {
+        int delta = (sym == SDLK_MINUS || sym == SDLK_KP_MINUS ||
+                     sym == SDLK_EQUALS) ? -2 : 2;
+        int new_pt = photon_sdl_get_font_size(ctx) + delta;
+        if (new_pt < 6)  new_pt = 6;
+        if (new_pt > 72) new_pt = 72;
+        int nc = 0, nr = 0;
+        photon_sdl_set_font_size(ctx, new_pt, &nc, &nr);
         return;
     }
 
@@ -1857,6 +1901,13 @@ static void translate_sdl_event(photon_sdl_t *ctx, const SDL_Event *ev)
         }
     }
     /* Other keys (e.g. bare modifiers, media keys) - ignored */
+
+    /* Catch mouse-up that happened outside the window.  SDL only delivers
+     * MOUSEBUTTONUP when the release occurs over our window.  Poll the button
+     * state after processing all events to finalise a stale selection. */
+    if (ctx->sel_active && !(SDL_GetMouseState(NULL, NULL) & SDL_BUTTON(SDL_BUTTON_LEFT))) {
+        photon_sdl_clear_selection(ctx);
+    }
 }
 
 /* ── Input polling ──────────────────────────────────────────────────── */

@@ -226,8 +226,8 @@ void photon_sdl_apply_palette_mode(struct photon_sdl *sdl,
 void photon_settings_defaults(photon_settings_t *s)
 {
     memset(s, 0, sizeof(*s));
-    s->cols         = 80;
-    s->rows         = 25;
+    s->cols         = 0;   /* 0 = auto-detect from window size */
+    s->rows         = 0;
     s->font_height  = 0;  /* auto */
     s->font_mode    = PHOTON_FONT_TTF;
     s->ttf_path[0]  = 0;  /* bundled */

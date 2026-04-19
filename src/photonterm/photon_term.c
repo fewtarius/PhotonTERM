@@ -562,7 +562,15 @@ static void run_scrollback_viewer(vte_t *vte, photon_sdl_t *sdl)
         }
 
         SDL_Event ev;
-        if (!SDL_WaitEventTimeout(&ev, 50)) continue;
+        if (!SDL_WaitEventTimeout(&ev, 50)) {
+            /* No event: poll mouse to catch button-up outside the window. */
+            if (photon_sdl_sel_active(sdl) &&
+                !(SDL_GetMouseState(NULL, NULL) & SDL_BUTTON(SDL_BUTTON_LEFT))) {
+                photon_sdl_clear_selection(sdl);
+                redraw = true;
+            }
+            continue;
+        }
         if (ev.type == SDL_QUIT) { done = true; break; }
 
         int prev_top = scroll_top;
@@ -626,6 +634,14 @@ static void run_scrollback_viewer(vte_t *vte, photon_sdl_t *sdl)
             }
             redraw = true;
             continue;
+        }
+
+        /* Window leave: clear any stale selection. */
+        if (ev.type == SDL_WINDOWEVENT && ev.window.event == SDL_WINDOWEVENT_LEAVE) {
+            if (photon_sdl_sel_active(sdl)) {
+                photon_sdl_clear_selection(sdl);
+                redraw = true;
+            }
         }
 
         if (ev.type != SDL_KEYDOWN) continue;
