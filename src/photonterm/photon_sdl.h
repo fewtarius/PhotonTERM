@@ -171,6 +171,11 @@ bool photon_sdl_quit_requested(const photon_sdl_t *ctx);
 int photon_sdl_cols(const photon_sdl_t *ctx);
 int photon_sdl_rows(const photon_sdl_t *ctx);
 
+/* Set fixed terminal size.  When cols/rows are non-zero, window resize scales
+ * the font to maintain these grid dimensions instead of changing cols/rows.
+ * Pass 0,0 for auto (grid adapts to window size). */
+void photon_sdl_set_fixed_size(photon_sdl_t *ctx, int cols, int rows);
+
 /* Direct read-only access to the shadow buffer for bulk copy.
  * Returns NULL if shadow is not allocated. */
 const vte_cell_t *photon_sdl_shadow_ptr(const photon_sdl_t *ctx);

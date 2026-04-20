@@ -319,6 +319,7 @@ int main(int argc, char **argv)
     /* Load settings and apply theme */
     photon_settings_t settings;
     photon_settings_load(&settings);
+    photon_sdl_set_fixed_size(sdl, settings.cols, settings.rows);
     {
         int tidx = photon_theme_find(settings.theme_name);
         photon_theme_apply(tidx >= 0 ? tidx : 0, sdl, &settings);
@@ -340,6 +341,8 @@ int main(int argc, char **argv)
                                                 has_reselect ? &reselect_bbs : NULL);
         show_directory = false;  /* reset: only skip splash for the next call */
         has_reselect = false;
+        /* Settings may have changed in the directory (terminal size, etc.) */
+        photon_sdl_set_fixed_size(sdl, settings.cols, settings.rows);
         if (!bbs) {
             PHOTON_DBG("user cancelled BBS list");
             if (ntabs == 0) break;  /* no tabs open -> exit */

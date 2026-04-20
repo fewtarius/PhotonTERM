@@ -273,6 +273,11 @@ struct photon_sdl {
     int           pending_cols;
     int           pending_rows;
 
+    /* Fixed terminal size from settings.  When non-zero, window resize scales
+     * the font to maintain this grid size rather than changing cols/rows. */
+    int           fixed_cols;
+    int           fixed_rows;
+
     /* Saved windowed dimensions: captured when entering fullscreen so we can
      * restore the correct logical size on exit (especially needed on Wayland,
      * where SDL_GetWindowSize returns the fullscreen size briefly after
@@ -1612,7 +1617,21 @@ static void translate_sdl_event(photon_sdl_t *ctx, const SDL_Event *ev)
             ctx->win_w = log_w;
             ctx->win_h = log_h;
             ctx->retina_scale = (log_w > 0) ? (float)draw_w / (float)log_w : 1.0f;
-            if (ctx->cell_w > 0 && ctx->cell_h > 0) {
+            if (ctx->fixed_cols > 0 && ctx->fixed_rows > 0) {
+                /* Fixed terminal size: scale the font to fit the configured
+                 * grid in the new window dimensions. */
+                int pt_w = log_w / ((ctx->fixed_cols + 1) / 2);  /* cell_w ~ pt/2 */
+                int pt_h = log_h / ctx->fixed_rows;               /* cell_h ~ pt */
+                int new_pt = pt_w < pt_h ? pt_w : pt_h;
+                if (new_pt < 6) new_pt = 6;
+                if (new_pt > 72) new_pt = 72;
+                /* Round down to even for cleaner glyph metrics */
+                new_pt &= ~1;
+                if (new_pt >= 6 && new_pt != ctx->font_pt) {
+                    int nc = 0, nr = 0;
+                    photon_sdl_set_font_size(ctx, new_pt, &nc, &nr);
+                }
+            } else if (ctx->cell_w > 0 && ctx->cell_h > 0) {
                 int nc = log_w / ctx->cell_w;
                 int nr = log_h / ctx->cell_h;
                 if (nc < 1) nc = 1;
@@ -1785,7 +1804,19 @@ static void translate_sdl_event(photon_sdl_t *ctx, const SDL_Event *ev)
         ctx->draw_w = draw_w;
         ctx->draw_h = draw_h;
         ctx->retina_scale = (win_w > 0) ? (float)draw_w / (float)win_w : 1.0f;
-        if (ctx->cell_w > 0 && ctx->cell_h > 0) {
+        if (ctx->fixed_cols > 0 && ctx->fixed_rows > 0) {
+            /* Fixed grid: scale font to fit */
+            int pt_w = win_w / ((ctx->fixed_cols + 1) / 2);
+            int pt_h = win_h / ctx->fixed_rows;
+            int new_pt = pt_w < pt_h ? pt_w : pt_h;
+            if (new_pt < 6) new_pt = 6;
+            if (new_pt > 72) new_pt = 72;
+            new_pt &= ~1;
+            if (new_pt >= 6 && new_pt != ctx->font_pt) {
+                int nc = 0, nr = 0;
+                photon_sdl_set_font_size(ctx, new_pt, &nc, &nr);
+            }
+        } else if (ctx->cell_w > 0 && ctx->cell_h > 0) {
             int nc = win_w / ctx->cell_w;
             int nr = win_h / ctx->cell_h;
             if (nc < 1) nc = 1;
@@ -2008,6 +2039,14 @@ int photon_sdl_rows(const photon_sdl_t *ctx)
     return (ctx->resize_pending && ctx->pending_rows > 0)
            ? ctx->pending_rows : ctx->rows;
 }
+
+void photon_sdl_set_fixed_size(photon_sdl_t *ctx, int cols, int rows)
+{
+    if (!ctx) return;
+    ctx->fixed_cols = cols;
+    ctx->fixed_rows = rows;
+}
+
 const vte_cell_t *photon_sdl_shadow_ptr(const photon_sdl_t *ctx)
 {
     return ctx ? ctx->shadow : NULL;
