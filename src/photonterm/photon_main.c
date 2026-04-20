@@ -86,7 +86,7 @@ static bool ssh_password_prompt(const char *prompt, char *out, size_t outsz,
 bool quitting = false;
 
 /* Version string - updated by scripts/release.sh */
-const char *photonterm_version = "PhotonTERM 20260419.4";
+const char *photonterm_version = "PhotonTERM 20260420.1";
 
 /* ── Signal handling ─────────────────────────────────────────────────── */
 
