@@ -1632,10 +1632,10 @@ static void translate_sdl_event(photon_sdl_t *ctx, const SDL_Event *ev)
                        (size_t)ctx->shadow_cols * ctx->shadow_rows * sizeof(vte_cell_t));
         }
         if (ev->window.event == SDL_WINDOWEVENT_LEAVE) {
-            /* Mouse left the window while dragging - clear the selection so
-             * the highlight doesn't get stuck.  The button-up may have happened
-             * outside the window, in which case the MOUSEUP handler won't fire. */
-            if (ctx->sel_active)
+            /* Mouse left the window while dragging - if the button was released
+             * outside, clear the selection so highlight doesn't get stuck. */
+            if (ctx->sel_active &&
+                !(SDL_GetMouseState(NULL, NULL) & SDL_BUTTON(SDL_BUTTON_LEFT)))
                 photon_sdl_clear_selection(ctx);
         }
         return;
@@ -1658,8 +1658,11 @@ static void translate_sdl_event(photon_sdl_t *ctx, const SDL_Event *ev)
     if (ev->type == SDL_MOUSEBUTTONDOWN && ev->button.button == SDL_BUTTON_LEFT) {
         PHOTON_DBG("mouse: MOUSEDOWN x=%d y=%d cell_w=%d cell_h=%d cols=%d rows=%d",
             ev->button.x, ev->button.y, ctx->cell_w, ctx->cell_h, ctx->cols, ctx->rows);
+        /* Clear any previous selection (invalidates shadow rows so the old
+         * highlight overlay gets erased on the next repaint). */
+        if (ctx->sel_have)
+            photon_sdl_clear_selection(ctx);
         ctx->sel_active = true;
-        ctx->sel_have   = false;  /* erase any stale highlight; new drag has no highlight yet */
         int col = ev->button.x / ctx->cell_w;
         int row = ev->button.y / ctx->cell_h;
         if (col >= ctx->cols) col = ctx->cols - 1;
@@ -1801,8 +1804,7 @@ static void translate_sdl_event(photon_sdl_t *ctx, const SDL_Event *ev)
         (sym == SDLK_PLUS || sym == SDLK_KP_PLUS ||
          sym == SDLK_MINUS || sym == SDLK_KP_MINUS ||
          sym == SDLK_EQUALS)) {
-        int delta = (sym == SDLK_MINUS || sym == SDLK_KP_MINUS ||
-                     sym == SDLK_EQUALS) ? -2 : 2;
+        int delta = (sym == SDLK_MINUS || sym == SDLK_KP_MINUS) ? -2 : 2;
         int new_pt = photon_sdl_get_font_size(ctx) + delta;
         if (new_pt < 6)  new_pt = 6;
         if (new_pt > 72) new_pt = 72;
@@ -1901,13 +1903,6 @@ static void translate_sdl_event(photon_sdl_t *ctx, const SDL_Event *ev)
         }
     }
     /* Other keys (e.g. bare modifiers, media keys) - ignored */
-
-    /* Catch mouse-up that happened outside the window.  SDL only delivers
-     * MOUSEBUTTONUP when the release occurs over our window.  Poll the button
-     * state after processing all events to finalise a stale selection. */
-    if (ctx->sel_active && !(SDL_GetMouseState(NULL, NULL) & SDL_BUTTON(SDL_BUTTON_LEFT))) {
-        photon_sdl_clear_selection(ctx);
-    }
 }
 
 /* ── Input polling ──────────────────────────────────────────────────── */
@@ -1941,6 +1936,12 @@ bool photon_sdl_poll_key(photon_sdl_t *ctx, photon_key_t *key)
     SDL_Event ev;
     while (SDL_PollEvent(&ev))
         translate_sdl_event(ctx, &ev);
+
+    /* Catch mouse-up that happened outside the window.  SDL may not deliver
+     * MOUSEBUTTONUP when the release occurs over another window.  Poll the
+     * button state after draining all events to finalise a stale selection. */
+    if (ctx->sel_active && !(SDL_GetMouseState(NULL, NULL) & SDL_BUTTON(SDL_BUTTON_LEFT)))
+        photon_sdl_clear_selection(ctx);
 
     return kq_pop(&ctx->keys, key);
 }
