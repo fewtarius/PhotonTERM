@@ -7,14 +7,25 @@
 # Linux/other: early_init.c (constructor attribute for pre-SDL signal setup)
 
 # ── Find dependencies ──────────────────────────────────────────────────
-find_package(SDL2 REQUIRED)
-find_package(SDL2_ttf REQUIRED)
-find_package(OpenSSL REQUIRED)
+# SDL2/SDL2_ttf: use pkg-config on non-Apple to avoid macOS FRAMEWORK
+# features in the bundled CMake configs.  On Apple, find_package works
+# because the bundled deps were built there.
+# libssh2/OpenSSL: same issue - bundled CMake configs have macOS paths.
+if(APPLE)
+    find_package(SDL2 REQUIRED)
+    find_package(SDL2_ttf REQUIRED)
+    find_package(OpenSSL REQUIRED)
+    find_package(libssh2 REQUIRED)
+else()
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(SDL2 REQUIRED IMPORTED_TARGET sdl2)
+    pkg_check_modules(SDL2_TTF REQUIRED IMPORTED_TARGET SDL2_ttf)
+    pkg_check_modules(OPENSSL REQUIRED IMPORTED_TARGET openssl)
+    pkg_check_modules(LIBSSH2 REQUIRED IMPORTED_TARGET libssh2)
+endif()
+
 find_package(Threads REQUIRED)
 find_package(ZLIB REQUIRED)
-
-# libssh2 ships a cmake config in lib/cmake/libssh2/
-find_package(libssh2 REQUIRED)
 
 # ── Source files ───────────────────────────────────────────────────────
 set(PHOTON_SOURCES
@@ -36,8 +47,6 @@ set(PHOTON_SOURCES
 
 if(APPLE)
     list(APPEND PHOTON_SOURCES DarwinWrappers.m)
-elseif(WIN32)
-    list(APPEND PHOTON_SOURCES photonterm.rc)
 else()
     list(APPEND PHOTON_SOURCES early_init.c)
 endif()
@@ -54,12 +63,6 @@ target_compile_definitions(photonterm PRIVATE
 
 if(APPLE)
     target_compile_definitions(photonterm PRIVATE __DARWIN__ __unix__)
-elseif(WIN32)
-    target_compile_definitions(photonterm PRIVATE
-        _WIN32
-        _USE_MATH_DEFINES
-        __USE_MINGW_ANSI_STDIO=1
-    )
 else()
     target_compile_definitions(photonterm PRIVATE __unix__)
 endif()
@@ -91,45 +94,29 @@ target_include_directories(photonterm PRIVATE
 )
 
 # ── Link libraries ─────────────────────────────────────────────────────
+if(APPLE)
+    target_link_libraries(photonterm PRIVATE
+        SDL2::SDL2-static
+        SDL2_ttf::SDL2_ttf-static
+        OpenSSL::SSL
+        libssh2::libssh2_static
+    )
+else()
+    target_link_libraries(photonterm PRIVATE
+        PkgConfig::SDL2
+        PkgConfig::SDL2_TTF
+        PkgConfig::OPENSSL
+        PkgConfig::LIBSSH2
+    )
+endif()
+
 target_link_libraries(photonterm PRIVATE
-    SDL2::SDL2-static
-    SDL2_ttf::SDL2_ttf-static
-    OpenSSL::SSL
-    libssh2::libssh2_static
     ZLIB::ZLIB
     Threads::Threads
 )
 
 # Platform-specific link setup
-if(WIN32)
-    # Fully static binary - no DLL dependencies at all.
-    # -static tells MinGW to link libgcc, libstdc++, and libwinpthread
-    # statically instead of requiring their DLLs at runtime.
-    target_link_options(photonterm PRIVATE -static -mwindows)
-
-    # SDL2main provides WinMain -> SDL_main trampoline
-    target_link_libraries(photonterm PRIVATE SDL2::SDL2main)
-
-    # Windows system libraries needed by our deps:
-    #   ws2_32     - Winsock (networking)
-    #   crypt32    - OpenSSL certificate store (e_capi, winstore)
-    #   gdi32      - OpenSSL / SDL2
-    #   winmm      - SDL2 (multimedia timers)
-    #   imm32      - SDL2 (IME input)
-    #   setupapi   - SDL2 (device enumeration)
-    #   version    - SDL2 (version info API)
-    target_link_libraries(photonterm PRIVATE
-        ws2_32 crypt32 gdi32 winmm imm32 setupapi version
-    )
-
-    # GNU ld is order-sensitive. libcrypto.a needs crypt32/gdi32 but CMake
-    # places our target_link_libraries before libcrypto (a transitive dep
-    # of OpenSSL::SSL via OpenSSL::Crypto). Append to the imported target's
-    # interface so they appear after libcrypto.a in the link line.
-    set_property(TARGET OpenSSL::Crypto APPEND PROPERTY
-        INTERFACE_LINK_LIBRARIES crypt32 gdi32
-    )
-elseif(APPLE)
+if(APPLE)
     target_link_libraries(photonterm PRIVATE
         "-framework Foundation"
         "-framework Security"
@@ -137,10 +124,8 @@ elseif(APPLE)
     )
 endif()
 
-# libm - needed on POSIX; not needed on Windows (math in msvcrt)
-if(NOT WIN32)
-    target_link_libraries(photonterm PRIVATE m)
-endif()
+# libm - needed on POSIX
+target_link_libraries(photonterm PRIVATE m)
 
 # ── macOS app bundle ───────────────────────────────────────────────────
 if(APPLE)
