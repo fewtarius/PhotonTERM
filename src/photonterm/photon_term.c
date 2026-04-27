@@ -47,6 +47,9 @@ static void *s_session_menu_userdata = NULL;
 static photon_render_overlay_fn s_render_overlay_fn = NULL;
 static void *s_render_overlay_userdata = NULL;
 
+/* Track whether the Alt-tab overlay was drawn last frame (to erase it) */
+static bool alt_overlay_active = false;
+
 /* Key hook callback (set by host apps to intercept keys before processing) */
 static photon_key_hook_fn s_key_hook_fn = NULL;
 static void *s_key_hook_userdata = NULL;
@@ -539,13 +542,6 @@ static void run_scrollback_viewer(vte_t *vte, photon_sdl_t *sdl)
                 }
             }
 
-            /* Draw selection highlight overlay */
-            if (photon_sdl_sel_active(sdl) || photon_sdl_get_selection(sdl, NULL, NULL, NULL, NULL)) {
-                int c0, r0, c1, r1;
-                if (photon_sdl_get_selection(sdl, &c0, &r0, &c1, &r1))
-                    photon_sdl_draw_selection(sdl, c0, r0, c1, r1, visible);
-            }
-
             /* Status bar on bottom row */
             char status[128];
             snprintf(status, sizeof(status),
@@ -916,15 +912,18 @@ photon_term_result_t photon_doterm(vte_t *vte, photon_sdl_t *sdl,
              * on low-spec hardware (e.g. 8th-gen Intel iGPU). */
             if (dirty || got_data || sel_live || (t - last_render) >= FRAME_MS) {
                 photon_sdl_repaint(sdl, vte);
-                if (photon_sdl_sel_active(sdl) || photon_sdl_get_selection(sdl, NULL, NULL, NULL, NULL)) {
-                    int c0, r0, c1, r1;
-                    if (photon_sdl_get_selection(sdl, &c0, &r0, &c1, &r1)) {
-                        int rows = photon_sdl_rows(sdl);
-                        photon_sdl_draw_selection(sdl, c0, r0, c1, r1, rows);
-                    }
-                }
-                if (alt_held && tabbar && tabbar->ntabs > 1)
+                /* Alt-tab overlay: draw on texture, but invalidate the tab
+                 * bar row when Alt is released so repaint erases it. */
+                if (alt_held && tabbar && tabbar->ntabs > 1) {
                     draw_alt_overlay(sdl, tabbar);
+                    alt_overlay_active = true;
+                } else if (alt_overlay_active) {
+                    /* Alt released: invalidate last row so repaint erases overlay */
+                    photon_sdl_invalidate_range(sdl,
+                        photon_sdl_rows(sdl) - 1, photon_sdl_rows(sdl) - 1);
+                    alt_overlay_active = false;
+                    dirty = true;
+                }
                 if (s_render_overlay_fn)
                     s_render_overlay_fn(sdl, vte, s_render_overlay_userdata);
                 photon_sdl_present(sdl);

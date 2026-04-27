@@ -1198,30 +1198,6 @@ void photon_sdl_draw_cell(photon_sdl_t *ctx, int col, int row,
             dst.x, dst.y + ctx->cell_h - 1,
             dst.x + ctx->cell_w - 1, dst.y + ctx->cell_h - 1);
     }
-
-    /* Selection highlight: semi-transparent inversion overlay */
-    if (ctx->sel_have || ctx->sel_active) {
-        int c0, r0, c1, r1;
-        if (photon_sdl_get_selection(ctx, &c0, &r0, &c1, &r1)) {
-            int cc = col - 1;  /* convert to 0-based */
-            int cr = row - 1;
-            bool in_sel;
-            if (r0 == r1)
-                in_sel = (cr == r0 && cc >= c0 && cc <= c1);
-            else if (cr == r0)
-                in_sel = (cc >= c0);
-            else if (cr == r1)
-                in_sel = (cc <= c1);
-            else
-                in_sel = (cr > r0 && cr < r1);
-            if (in_sel) {
-                SDL_SetRenderDrawBlendMode(ctx->ren, SDL_BLENDMODE_BLEND);
-                SDL_SetRenderDrawColor(ctx->ren, 255, 255, 255, 80);
-                SDL_RenderFillRect(ctx->ren, &dst);
-                SDL_SetRenderDrawBlendMode(ctx->ren, SDL_BLENDMODE_NONE);
-            }
-        }
-    }
 }
 
 /* ── Draw cursor ────────────────────────────────────────────────────── */
@@ -1352,12 +1328,24 @@ void photon_sdl_clear(photon_sdl_t *ctx)
 void photon_sdl_present(photon_sdl_t *ctx)
 {
     if (!ctx) return;
-    /* Blit the persistent render-target texture to the screen back buffer,
-     * then flip.  All draw calls between presents go to ctx->texture
-     * (which retains its content across frames), so the shadow-buffer
-     * skip optimisation works correctly with double-buffered SDL. */
+    /* Blit the persistent render-target texture to the screen back buffer.
+     * All draw calls between presents go to ctx->texture (which retains
+     * its content across frames), so the shadow-buffer skip optimisation
+     * works correctly with double-buffered SDL. */
     SDL_SetRenderTarget(ctx->ren, NULL);
     SDL_RenderCopy(ctx->ren, ctx->texture, NULL, NULL);
+
+    /* Draw selection highlight overlay on the screen backbuffer (ephemeral).
+     * This avoids the overlay persisting on the render-target texture,
+     * which caused highlight to remain visible after the selection was
+     * cleared because repaint() skips cells that match the shadow buffer. */
+    if (ctx->sel_have || ctx->sel_active) {
+        int c0, r0, c1, r1;
+        if (photon_sdl_get_selection(ctx, &c0, &r0, &c1, &r1)) {
+            photon_sdl_draw_selection(ctx, c0, r0, c1, r1, ctx->rows);
+        }
+    }
+
     SDL_RenderPresent(ctx->ren);
     /* Re-activate the render target for the next frame's draw calls */
     SDL_SetRenderTarget(ctx->ren, ctx->texture);
