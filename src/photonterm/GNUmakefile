@@ -103,6 +103,7 @@ endif
 
 # ── Compile flags ──────────────────────────────────────────────────────
 CFLAGS := $(OPT) -Wall -Wno-char-subscripts -fno-delete-null-pointer-checks \
+           -D_GNU_SOURCE \
            $(SDL2_CFLAGS) $(TTF_CFLAGS) $(SSH2_CFLAGS) \
            -DLINK_LIST_THREADSAFE -DXPDEV_THREAD_SAFE
 
