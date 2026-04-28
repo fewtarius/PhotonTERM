@@ -1758,15 +1758,17 @@ static void translate_sdl_event(photon_sdl_t *ctx, const SDL_Event *ev)
     if (km & KMOD_GUI)    mod |= PHOTON_MOD_META;
 
     /* Alt-Enter or F11: toggle fullscreen.
-     * Use SDL_WINDOW_FULLSCREEN (not DESKTOP) so the window actually resizes
-     * to the display resolution - this lets the grid expand to fill the screen.
-     * SDL_WINDOW_FULLSCREEN_DESKTOP would scale the windowed content in place,
-     * leaving cols/rows unchanged (visual scale ≠ grid resize). */
+     * SDL_WINDOW_FULLSCREEN_DESKTOP keeps the desktop resolution (no mode
+     * switch) and expands the window to fill the display.  The WINDOWEVENT
+     * handler recomputes grid cols/rows from the new window size, so the
+     * terminal session automatically fills the screen at the current font size.
+     * On exit we restore the saved windowed size and the same handler shrinks
+     * the grid back. */
     if (((mod & PHOTON_MOD_ALT) && (sym == SDLK_RETURN || sym == SDLK_KP_ENTER))
         || sym == SDLK_F11) {
         Uint32 flags = SDL_GetWindowFlags(ctx->win);
-        if (flags & SDL_WINDOW_FULLSCREEN) {
-            /* Exiting fullscreen: restore the windowed size we saved on entry. */
+        if (flags & (SDL_WINDOW_FULLSCREEN | SDL_WINDOW_FULLSCREEN_DESKTOP)) {
+            /* Exiting fullscreen: restore saved windowed size. */
             SDL_SetWindowFullscreen(ctx->win, 0);
             if (ctx->pre_fullscreen_win_w > 0 && ctx->pre_fullscreen_win_h > 0) {
                 SDL_SetWindowSize(ctx->win,
@@ -1774,50 +1776,39 @@ static void translate_sdl_event(photon_sdl_t *ctx, const SDL_Event *ev)
                                   ctx->pre_fullscreen_win_h);
             }
         } else {
-            /* Entering fullscreen: save current windowed logical size first so we
-             * can restore it exactly on exit (especially important on Wayland,
-             * where SDL_GetWindowSize may briefly return the fullscreen resolution
-             * before the compositor sends the windowed resize event). */
+            /* Entering fullscreen: save current windowed size for later restore. */
             SDL_GetWindowSize(ctx->win, &ctx->pre_fullscreen_win_w,
                              &ctx->pre_fullscreen_win_h);
-            SDL_SetWindowFullscreen(ctx->win, SDL_WINDOW_FULLSCREEN);
+            SDL_SetWindowFullscreen(ctx->win, SDL_WINDOW_FULLSCREEN_DESKTOP);
         }
-        /* Use SDL_GetRendererOutputSize for physical dimensions; these are
-         * reliable immediately after a fullscreen transition on both X11 and
-         * Wayland (they report the committed output size, not the logical
-         * window size which can lag on Wayland). */
-        int win_w, win_h, draw_w, draw_h;
-        SDL_GetRendererOutputSize(ctx->ren, &draw_w, &draw_h);
-        SDL_GetWindowSize(ctx->win, &win_w, &win_h);
-        /* Use the larger of logical and physical so we fill the screen. */
-        if (win_w < draw_w) win_w = draw_w;
-        if (win_h < draw_h) win_h = draw_h;
-        ctx->win_w = win_w;
-        ctx->win_h = win_h;
-        ctx->draw_w = draw_w;
-        ctx->draw_h = draw_h;
-        ctx->retina_scale = (win_w > 0) ? (float)draw_w / (float)win_w : 1.0f;
-        if (ctx->fixed_cols > 0 && ctx->fixed_rows > 0) {
-            /* Fixed grid: scale font to fit */
-            int pt_w = win_w / ((ctx->fixed_cols + 1) / 2);
-            int pt_h = win_h / ctx->fixed_rows;
-            int new_pt = pt_w < pt_h ? pt_w : pt_h;
-            if (new_pt < 6) new_pt = 6;
-            if (new_pt > 72) new_pt = 72;
-            new_pt &= ~1;
-            if (new_pt >= 6 && new_pt != ctx->font_pt) {
-                int nc = 0, nr = 0;
-                photon_sdl_set_font_size(ctx, new_pt, &nc, &nr);
+        /* Force a grid recalculation from the current window size.
+         * On compositors like Gamescope the window is already fullscreen so
+         * SDL_SetWindowFullscreen is a no-op and no WINDOWEVENT fires - we
+         * must compute the grid ourselves.  On normal compositors the
+         * WINDOWEVENT will also fire and do this, which is harmless since
+         * the values will be the same. */
+        {
+            int draw_w, draw_h;
+            SDL_GetRendererOutputSize(ctx->ren, &draw_w, &draw_h);
+            int log_w = draw_w, log_h = draw_h;
+            SDL_GetWindowSize(ctx->win, &log_w, &log_h);
+            if (log_w < draw_w) log_w = draw_w;
+            if (log_h < draw_h) log_h = draw_h;
+            ctx->win_w = log_w;
+            ctx->win_h = log_h;
+            ctx->draw_w = draw_w;
+            ctx->draw_h = draw_h;
+            ctx->retina_scale = (log_w > 0) ? (float)draw_w / (float)log_w : 1.0f;
+            if (ctx->cell_w > 0 && ctx->cell_h > 0) {
+                int nc = log_w / ctx->cell_w;
+                int nr = log_h / ctx->cell_h;
+                if (nc < 1) nc = 1;
+                if (nr < 1) nr = 1;
+                ctx->pending_cols = nc;
+                ctx->pending_rows = nr;
+                ctx->resize_pending = true;
             }
-        } else if (ctx->cell_w > 0 && ctx->cell_h > 0) {
-            int nc = win_w / ctx->cell_w;
-            int nr = win_h / ctx->cell_h;
-            if (nc < 1) nc = 1;
-            if (nr < 1) nr = 1;
-            ctx->pending_cols = nc;
-            ctx->pending_rows = nr;
         }
-        ctx->resize_pending = true;
         return;
     }
 
@@ -2038,6 +2029,40 @@ void photon_sdl_set_fixed_size(photon_sdl_t *ctx, int cols, int rows)
     if (!ctx) return;
     ctx->fixed_cols = cols;
     ctx->fixed_rows = rows;
+}
+
+/* Enter fullscreen mode (--fullscreen command line option).
+ * Saves the current windowed size and switches to fullscreen desktop mode.
+ * Forces a grid recalculation from the current window size so the terminal
+ * fills the display even on compositors like Gamescope where the window is
+ * already fullscreen and SDL_SetWindowFullscreen is a no-op. */
+void photon_sdl_enter_fullscreen(photon_sdl_t *ctx)
+{
+    if (!ctx) return;
+    SDL_GetWindowSize(ctx->win, &ctx->pre_fullscreen_win_w,
+                     &ctx->pre_fullscreen_win_h);
+    SDL_SetWindowFullscreen(ctx->win, SDL_WINDOW_FULLSCREEN_DESKTOP);
+    /* Force grid recalculation from current window size */
+    int draw_w, draw_h;
+    SDL_GetRendererOutputSize(ctx->ren, &draw_w, &draw_h);
+    int log_w = draw_w, log_h = draw_h;
+    SDL_GetWindowSize(ctx->win, &log_w, &log_h);
+    if (log_w < draw_w) log_w = draw_w;
+    if (log_h < draw_h) log_h = draw_h;
+    ctx->win_w = log_w;
+    ctx->win_h = log_h;
+    ctx->draw_w = draw_w;
+    ctx->draw_h = draw_h;
+    ctx->retina_scale = (log_w > 0) ? (float)draw_w / (float)log_w : 1.0f;
+    if (ctx->cell_w > 0 && ctx->cell_h > 0) {
+        int nc = log_w / ctx->cell_w;
+        int nr = log_h / ctx->cell_h;
+        if (nc < 1) nc = 1;
+        if (nr < 1) nr = 1;
+        ctx->pending_cols = nc;
+        ctx->pending_rows = nr;
+        ctx->resize_pending = true;
+    }
 }
 
 const vte_cell_t *photon_sdl_shadow_ptr(const photon_sdl_t *ctx)

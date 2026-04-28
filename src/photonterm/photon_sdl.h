@@ -176,6 +176,11 @@ int photon_sdl_rows(const photon_sdl_t *ctx);
  * Pass 0,0 for auto (grid adapts to window size). */
 void photon_sdl_set_fixed_size(photon_sdl_t *ctx, int cols, int rows);
 
+/* Enter fullscreen mode.  Saves the current windowed size and switches to
+ * SDL_WINDOW_FULLSCREEN_DESKTOP.  The WINDOWEVENT handler recomputes the
+ * grid to fill the display at the current font size. */
+void photon_sdl_enter_fullscreen(photon_sdl_t *ctx);
+
 /* Direct read-only access to the shadow buffer for bulk copy.
  * Returns NULL if shadow is not allocated. */
 const vte_cell_t *photon_sdl_shadow_ptr(const photon_sdl_t *ctx);

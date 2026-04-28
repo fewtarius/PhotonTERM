@@ -349,10 +349,13 @@ static int create_and_connect_tab(photon_sdl_t *sdl, photon_ui_t *ui,
 
 int main(int argc, char **argv)
 {
+    bool start_fullscreen = false;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--debug") == 0) {
             photon_debug_enabled = true;
             photon_debug_open();
+        } else if (strcmp(argv[i], "--fullscreen") == 0) {
+            start_fullscreen = true;
         }
     }
     PHOTON_DBG("PhotonTERM start (unified main loop) argc=%d", argc);
@@ -382,6 +385,9 @@ int main(int argc, char **argv)
     }
     photon_sdl_global = sdl;
     PHOTON_DBG("SDL context created");
+
+    if (start_fullscreen)
+        photon_sdl_enter_fullscreen(sdl);
 
     /* UI VTE (for directory/settings overlays) */
     vte_callbacks_t dummy_cbs = photon_sdl_make_vte_callbacks(sdl);
