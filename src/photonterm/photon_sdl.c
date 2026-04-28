@@ -1491,13 +1491,17 @@ void photon_sdl_repaint(photon_sdl_t *ctx, vte_t *vte)
         }
     }
 
-    /* Draw cursor on top of rendered content (respect DECTCEM hide) */
+    /* Draw cursor on top of rendered content (respect DECTCEM hide).
+     * Always read cursor position from the VTE so switching tabs
+     * does not leave a stale cursor from the previous tab. */
+    int cur_c = 0, cur_r = 0;
+    vte_cursor_pos(vte, &cur_c, &cur_r);
     if (vte_cursor_visible(vte) &&
-        ctx->cur_col >= 1 && ctx->cur_row >= 1 &&
-        ctx->cur_col <= cols && ctx->cur_row <= rows) {
+        cur_c >= 1 && cur_r >= 1 &&
+        cur_c <= cols && cur_r <= rows) {
         vte_cell_t under_cell;
-        vte_get_cell(vte, ctx->cur_col, ctx->cur_row, &under_cell);
-        photon_sdl_draw_cursor(ctx, ctx->cur_col, ctx->cur_row, &under_cell);
+        vte_get_cell(vte, cur_c, cur_r, &under_cell);
+        photon_sdl_draw_cursor(ctx, cur_c, cur_r, &under_cell);
     }
 }
 

@@ -55,8 +55,12 @@ $(shell mkdir -p $(OBJDIR))
 
 # ── Third-party prefix ─────────────────────────────────────────────────
 DEPS_PREFIX := $(abspath ../../3rdp/prefix)
-ifeq ($(wildcard $(DEPS_PREFIX)/lib/libssh2.a),$(DEPS_PREFIX)/lib/libssh2.a)
-  USE_BUNDLED_DEPS := 1
+# Bundled deps are macOS-built (Mach-O).  Only use them on macOS.
+# On Linux, always fall through to system packages (pkg-config / sdl2-config).
+ifeq ($(os),darwin)
+  ifeq ($(wildcard $(DEPS_PREFIX)/lib/libssh2.a),$(DEPS_PREFIX)/lib/libssh2.a)
+    USE_BUNDLED_DEPS := 1
+  endif
 endif
 
 # ── SDL2 ───────────────────────────────────────────────────────────────
