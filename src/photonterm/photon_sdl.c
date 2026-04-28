@@ -1757,12 +1757,13 @@ static void translate_sdl_event(photon_sdl_t *ctx, const SDL_Event *ev)
     if (km & KMOD_ALT)    mod |= PHOTON_MOD_ALT;
     if (km & KMOD_GUI)    mod |= PHOTON_MOD_META;
 
-    /* Alt-Enter: toggle fullscreen.
+    /* Alt-Enter or F11: toggle fullscreen.
      * Use SDL_WINDOW_FULLSCREEN (not DESKTOP) so the window actually resizes
      * to the display resolution - this lets the grid expand to fill the screen.
      * SDL_WINDOW_FULLSCREEN_DESKTOP would scale the windowed content in place,
      * leaving cols/rows unchanged (visual scale ≠ grid resize). */
-    if ((mod & PHOTON_MOD_ALT) && (sym == SDLK_RETURN || sym == SDLK_KP_ENTER)) {
+    if (((mod & PHOTON_MOD_ALT) && (sym == SDLK_RETURN || sym == SDLK_KP_ENTER))
+        || sym == SDLK_F11) {
         Uint32 flags = SDL_GetWindowFlags(ctx->win);
         if (flags & SDL_WINDOW_FULLSCREEN) {
             /* Exiting fullscreen: restore the windowed size we saved on entry. */

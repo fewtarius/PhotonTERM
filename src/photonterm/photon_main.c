@@ -202,6 +202,23 @@ static void switch_tab(photon_sdl_t *sdl, photon_settings_t *settings, int idx)
     photon_sdl_present(sdl);
 }
 
+/* Resize all tab VTEs to account for tab bar row.
+ * When ntabs > 1, the last row is reserved for the tab bar. */
+static void resize_tabs_for_bar(photon_sdl_t *sdl)
+{
+    int nc = photon_sdl_cols(sdl);
+    int nr = photon_sdl_rows(sdl);
+    int term_rows = (ntabs > 1) ? nr - 1 : nr;
+    if (term_rows < 1) term_rows = 1;
+    for (int i = 0; i < ntabs; i++) {
+        if (tabs[i].active) {
+            vte_resize(tabs[i].vte, nc, term_rows);
+            photon_conn_set_active(tabs[i].conn);
+            photon_conn_resize(nc, term_rows);
+        }
+    }
+}
+
 /* Close a tab slot and shift remaining tabs down. */
 static void close_tab(photon_sdl_t *sdl, int idx)
 {
@@ -225,7 +242,8 @@ static void close_tab(photon_sdl_t *sdl, int idx)
     if (ntabs > 0)
         photon_conn_set_active(tabs[active_tab].conn);
 
-    (void)sdl;
+    /* Tab count changed - resize VTEs for tab bar row */
+    resize_tabs_for_bar(sdl);
 }
 
 /* ── Connection creation helper ──────────────────────────────────────── */
@@ -280,13 +298,13 @@ static int create_and_connect_tab(photon_sdl_t *sdl, photon_ui_t *ui,
     active_tab = slot;
     ntabs++;
 
+    /* Tab count changed - resize VTEs for tab bar row */
+    resize_tabs_for_bar(sdl);
+
     /* Auto-detect window size */
     if (settings->cols == 0 && settings->rows == 0) {
-        int nc = photon_sdl_cols(sdl);
-        int nr = photon_sdl_rows(sdl);
-        bbs->init_cols = nc;
-        bbs->init_rows = nr;
-        vte_resize(vte, nc, nr);
+        bbs->init_cols = photon_sdl_cols(sdl);
+        bbs->init_rows = photon_sdl_rows(sdl);
     }
 
     PHOTON_DBG("tab %d: connecting to '%s' %s:%u type=%d",
@@ -478,16 +496,34 @@ int main(int argc, char **argv)
                 }
 
                 /* Check if background tab disconnected */
-                if (i != active_tab &&
-                    photon_term_check_connection(tabs[i].conn) == PHOTON_TERM_DISCONNECT) {
-                    PHOTON_DBG("background tab %d disconnected", i);
-                    /* Close the dead background tab */
-                    close_tab(sdl, i);
-                    /* Rebuild tabbar after close */
-                    tabbar = build_tab_bar();
-                    /* Adjust loop index since tabs shifted */
-                    i--;
-                    continue;
+                if (photon_term_check_connection(tabs[i].conn) == PHOTON_TERM_DISCONNECT) {
+                    if (i == active_tab) {
+                        /* Active tab disconnected - close it and go to directory
+                         * or switch to another tab. */
+                        PHOTON_DBG("active tab %d disconnected", i);
+                        if (tabs[i].bbs) {
+                            reselect_bbs = *tabs[i].bbs;
+                            has_reselect = true;
+                        }
+                        close_tab(sdl, i);
+                        photon_theme_apply(photon_active_theme, sdl, &settings);
+                        if (ntabs == 0) {
+                            vte_resize(ui_vte, photon_sdl_cols(sdl),
+                                       photon_sdl_rows(sdl));
+                            photon_sdl_set_ttf_mode(sdl, false);
+                            show_directory = true;
+                            state = STATE_DIRECTORY;
+                        } else {
+                            switch_tab(sdl, &settings, active_tab);
+                        }
+                        break;
+                    } else {
+                        PHOTON_DBG("background tab %d disconnected", i);
+                        close_tab(sdl, i);
+                        tabbar = build_tab_bar();
+                        i--;
+                        continue;
+                    }
                 }
             }
 
@@ -562,6 +598,21 @@ int main(int argc, char **argv)
 
             /* 3. Render active tab */
             if (ntabs > 0 && tabs[active_tab].active) {
+                /* Check for window resize (fullscreen toggle, user drag) */
+                int nc = 0, nr = 0;
+                if (photon_sdl_check_resize(sdl, &nc, &nr)) {
+                    /* Reserve one row for tab bar when multiple tabs open */
+                    int term_rows = (ntabs > 1) ? nr - 1 : nr;
+                    if (term_rows < 1) term_rows = 1;
+                    for (int i = 0; i < ntabs; i++) {
+                        if (tabs[i].active)
+                            vte_resize(tabs[i].vte, nc, term_rows);
+                    }
+                    /* Notify the active connection of the new size */
+                    photon_conn_set_active(tabs[active_tab].conn);
+                    photon_conn_resize(nc, term_rows);
+                }
+
                 tabbar = build_tab_bar();
                 photon_conn_set_active(tabs[active_tab].conn);
                 photon_term_render(sdl, tabs[active_tab].vte, &tabbar,
