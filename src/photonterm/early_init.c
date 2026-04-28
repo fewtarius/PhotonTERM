@@ -9,6 +9,21 @@
 #include <signal.h>
 #include <stdlib.h>
 
+/* Flag set by SIGTERM handler so the main loop can exit cleanly.
+ * Steam / Gamescope sends SIGTERM to quit the application. */
+static volatile sig_atomic_t g_sigterm_pending = 0;
+
+int photonterm_sigterm_pending(void)
+{
+	return g_sigterm_pending;
+}
+
+static void sigterm_handler(int sig)
+{
+	(void)sig;
+	g_sigterm_pending = 1;
+}
+
 /*
  * Prevent SDL2 from installing its own SIGINT handler.
  * SDL2's SDL_Init(SDL_INIT_VIDEO) calls SDL_InstallParinterruptHandlers()
@@ -28,7 +43,7 @@ photonterm_early_init(void)
 	 * Clearing LD_PRELOAD avoids this without affecting normal Steam launch. */
 	unsetenv("LD_PRELOAD");
 	signal(SIGINT,  SIG_IGN);
-	signal(SIGTERM, SIG_IGN);
+	signal(SIGTERM, sigterm_handler);
 	signal(SIGHUP,  SIG_IGN);
 	signal(SIGPIPE, SIG_IGN);
 }

@@ -14,6 +14,20 @@ extern bool quitting;
 #import <AppKit/AppKit.h>
 #import <objc/runtime.h>
 
+/* Flag set by SIGTERM handler so the main loop can exit cleanly. */
+static volatile sig_atomic_t g_sigterm_pending = 0;
+
+int photonterm_sigterm_pending(void)
+{
+	return g_sigterm_pending;
+}
+
+static void sigterm_handler(int sig)
+{
+	(void)sig;
+	g_sigterm_pending = 1;
+}
+
 /*
  * Prevent SDL2 from installing its own signal handlers.  SDL's
  * SDL_Init(SDL_INIT_VIDEO) calls SDL_InstallParachute() which would
@@ -27,10 +41,11 @@ static void
 photonterm_early_init(void)
 {
 	setenv("SDL_NO_SIGNAL_HANDLERS", "1", 1 /* override */);
-	/* Ignore SIGINT/SIGTERM/SIGHUP/SIGPIPE; Ctrl-C passthrough is
-	 * handled via NSApp delegate swizzle (photonterm_install_app_delegate). */
+	/* Ignore SIGINT/SIGHUP/SIGPIPE; Ctrl-C passthrough is
+	 * handled via NSApp delegate swizzle (photonterm_install_app_delegate).
+	 * SIGTERM is caught so the main loop can exit cleanly. */
 	signal(SIGINT,  SIG_IGN);
-	signal(SIGTERM, SIG_IGN);
+	signal(SIGTERM, sigterm_handler);
 	signal(SIGHUP,  SIG_IGN);
 	signal(SIGPIPE, SIG_IGN);
 }

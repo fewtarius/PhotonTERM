@@ -62,6 +62,9 @@ static void photon_vte_bell_cb(vte_t *vte, void *user)
 #include <string.h>
 #include <stdio.h>
 
+/* Declared in early_init.c (Linux) / DarwinWrappers.m (macOS) */
+extern int photonterm_sigterm_pending(void);
+
 /* SSH password prompt: called by photon_conn when no other auth works */
 static bool ssh_password_prompt(const char *prompt, char *out, size_t outsz,
                                  void *userdata)
@@ -410,6 +413,15 @@ int main(int argc, char **argv)
     memset(&reselect_bbs, 0, sizeof(reselect_bbs));
 
     while (state != STATE_SHUTDOWN) {
+
+        /* Steam / Gamescope sends SIGTERM to quit.  Check the flag
+         * set by the signal handler so we exit cleanly.
+         * On macOS, the window close button sets the quitting flag. */
+        if (photonterm_sigterm_pending() || quitting) {
+            PHOTON_DBG("SIGTERM received, shutting down");
+            state = STATE_SHUTDOWN;
+            break;
+        }
 
         if (state == STATE_DIRECTORY) {
             /* ── BBS Directory ─────────────────────────────────────── */
