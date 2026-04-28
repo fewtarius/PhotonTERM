@@ -1550,3 +1550,55 @@ photon_conn_t *photon_conn_get_active(void)
 {
     return s_active;
 }
+
+/* ── Per-connection API (for multi-tab main loop) ───────────────────── */
+
+bool photon_conn_connected_for(photon_conn_t *C)
+{
+    if (!C) return false;
+    return C->inbuf &&
+           atomic_load(&C->rx.running) == 1 &&
+           atomic_load(&C->tx.running) == 1;
+}
+
+size_t photon_conn_data_waiting_for(photon_conn_t *C)
+{
+    if (!C || !C->inbuf) return 0;
+    pthread_mutex_lock(&C->inbuf->mu);
+    size_t n = ring_bytes(C->inbuf);
+    pthread_mutex_unlock(&C->inbuf->mu);
+    return n;
+}
+
+int photon_conn_recv_for(photon_conn_t *C, void *buf, size_t buflen)
+{
+    if (!C || !C->inbuf) return -1;
+    /* Non-blocking: check if any data is available, return immediately if not */
+    pthread_mutex_lock(&C->inbuf->mu);
+    size_t avail = ring_bytes(C->inbuf);
+    if (avail == 0) {
+        pthread_mutex_unlock(&C->inbuf->mu);
+        return 0;
+    }
+    size_t n = ring_get(C->inbuf, buf, buflen > avail ? avail : buflen);
+    pthread_mutex_unlock(&C->inbuf->mu);
+    return (int)n;
+}
+
+int photon_conn_send_for(photon_conn_t *C, const void *buf, size_t buflen)
+{
+    if (!C || !C->outbuf) return -1;
+    pthread_mutex_lock(&C->outbuf->mu);
+    size_t n = ring_put(C->outbuf, buf, buflen);
+    pthread_mutex_unlock(&C->outbuf->mu);
+    return (int)n;
+}
+
+void photon_conn_resize_for(photon_conn_t *C, int cols, int rows)
+{
+    if (!C || cols < 1 || rows < 1) return;
+    photon_conn_t *prev = s_active;
+    s_active = C;
+    photon_conn_resize(cols, rows);
+    s_active = prev;
+}

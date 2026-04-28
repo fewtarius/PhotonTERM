@@ -1,19 +1,10 @@
-/* photon_term.c - PhotonTERM terminal session loop (photon_vte + photon_sdl)
+/* photon_term.c - PhotonTERM terminal session (photon_vte + photon_sdl)
  *
  * Copyright (C) 2026 fewtarius and PhotonTERM contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
  *
- * photon_doterm() - run one connected terminal session.
- *
- * Key bindings:
- *   Alt-Z          - in-session options menu
- *   Ctrl-C         - send 0x03 to remote (interrupt, BBS standard)
- *   Ctrl-\         - force-disconnect and return to BBS list
- *
- * Return values:
- *   PHOTON_TERM_DISCONNECT   - remote disconnected / user disconnected
- *   PHOTON_TERM_QUIT         - user closed window / requested exit
- *   PHOTON_TERM_NEWTAB       - user requested new tab (Alt-W)
+ * Non-blocking pump/handle/render API for the unified main loop.
+ * Each tab's data is drained independently; only the active tab renders.
  */
 
 #include "photon_compat.h"
@@ -54,6 +45,10 @@ static bool alt_overlay_active = false;
 static photon_key_hook_fn s_key_hook_fn = NULL;
 static void *s_key_hook_userdata = NULL;
 
+/* Frame timing state (persists across calls) */
+static uint64_t s_last_render = 0;
+static const uint64_t FRAME_MS = 16;   /* ~60 fps render cap */
+
 void photon_term_set_session_menu(photon_session_menu_fn fn, void *userdata)
 {
     s_session_menu_fn = fn;
@@ -74,18 +69,15 @@ void photon_term_set_key_hook(photon_key_hook_fn fn, void *userdata)
 
 /* ── Alt-held tab bar overlay ────────────────────────────────────────── */
 
-/* Draw a one-row overlay on the bottom row showing tab list.
- * Shown while Alt/Option is held when ntabs > 1. */
 static void draw_alt_overlay(photon_sdl_t *sdl, const photon_tab_bar_t *tabbar)
 {
     if (!sdl || !tabbar || tabbar->ntabs <= 1) return;
 
     int cols = photon_sdl_cols(sdl);
     int rows = photon_sdl_rows(sdl);
-    int bar_row = rows;   /* 1-indexed: last row */
+    int bar_row = rows;
     int col = 1;
 
-    /* Tab entries */
     for (int i = 0; i < tabbar->ntabs && col <= cols; i++) {
         char label[72];
         snprintf(label, sizeof(label), " %d:%s%s ",
@@ -101,21 +93,18 @@ static void draw_alt_overlay(photon_sdl_t *sdl, const photon_tab_bar_t *tabbar)
             vte_cell_t cell = { (uint32_t)(unsigned char)label[j], fg, bg, att };
             photon_sdl_draw_cell(sdl, col, bar_row, &cell);
         }
-        /* Separator */
         if (col <= cols) {
             vte_cell_t sep = { '|', 8, 0, 0 };
             photon_sdl_draw_cell(sdl, col++, bar_row, &sep);
         }
     }
 
-    /* Hint: W=New */
     const char *hint = " W=New ";
     for (int j = 0; hint[j] && col <= cols; j++, col++) {
         vte_cell_t cell = { (uint32_t)(unsigned char)hint[j], 3, 0, 0 };
         photon_sdl_draw_cell(sdl, col, bar_row, &cell);
     }
 
-    /* Fill remainder */
     while (col <= cols) {
         vte_cell_t blank = { ' ', 7, 0, 0 };
         photon_sdl_draw_cell(sdl, col++, bar_row, &blank);
@@ -127,15 +116,12 @@ static void draw_alt_overlay(photon_sdl_t *sdl, const photon_tab_bar_t *tabbar)
 
 /* ── Mouse selection -> clipboard ───────────────────────────────────── */
 
-/* Extract text from VTE for a rectangular selection and copy to clipboard.
- * Uses vte_get_cell() to read each cell, encodes codepoints to UTF-8. */
 static void copy_selection_to_clipboard(vte_t *vte, photon_sdl_t *sdl)
 {
     int c0, r0, c1, r1;
     if (!photon_sdl_get_selection(sdl, &c0, &r0, &c1, &r1)) return;
 
     int cols = photon_sdl_cols(sdl);
-    /* Allocate worst case: (c1-c0+1) cols * (r1-r0+1) rows * 4 bytes/char + newlines */
     size_t bufsz = (size_t)(r1 - r0 + 1) * ((size_t)cols * 4 + 2) + 1;
     char *buf = malloc(bufsz);
     if (!buf) return;
@@ -144,7 +130,6 @@ static void copy_selection_to_clipboard(vte_t *vte, photon_sdl_t *sdl)
     for (int r = r0; r <= r1; r++) {
         int ca = (r == r0) ? c0 : 0;
         int cb = (r == r1) ? c1 : cols - 1;
-        /* Collect cells, trim trailing spaces */
         int last_nonsp = ca - 1;
         for (int c = ca; c <= cb; c++) {
             vte_cell_t cell;
@@ -156,7 +141,6 @@ static void copy_selection_to_clipboard(vte_t *vte, photon_sdl_t *sdl)
             Uint32 cp = ' ';
             if (vte_get_cell(vte, c + 1, r + 1, &cell) && cell.codepoint >= 0x20)
                 cp = cell.codepoint;
-            /* Encode UTF-8 */
             if (cp < 0x80) {
                 buf[pos++] = (char)cp;
             } else if (cp < 0x800) {
@@ -183,31 +167,24 @@ static void copy_selection_to_clipboard(vte_t *vte, photon_sdl_t *sdl)
 
 static int key_to_bytes(const photon_key_t *k, uint8_t *out)
 {
-    /* Printable UTF-8 text (from SDL_TEXTINPUT) - send as-is */
     if (k->text[0] && !(k->mod & PHOTON_MOD_CTRL) && !(k->mod & PHOTON_MOD_ALT)) {
         int len = (int)strnlen(k->text, sizeof(k->text));
         memcpy(out, k->text, (size_t)len);
         return len;
     }
 
-    /* Ctrl+letter -> 0x01-0x1A */
     if (k->mod & PHOTON_MOD_CTRL) {
-        /* SDL already translated Ctrl+letter to the control code (1-26) */
         if (k->code >= 1 && k->code <= 26) {
             out[0] = (uint8_t)k->code; return 1;
         }
-        /* Also handle if SDL sends the letter itself */
         int base = -1;
         if (k->code >= 'a' && k->code <= 'z') base = k->code - 'a';
         if (k->code >= 'A' && k->code <= 'Z') base = k->code - 'A';
         if (base >= 0) { out[0] = (uint8_t)(base + 1); return 1; }
-        /* Ctrl-[ = ESC */
         if (k->code == '[') { out[0] = '\x1b'; return 1; }
     }
 
-    /* Special keys -> ANSI/VT100 sequences */
     switch (k->code) {
-        /* ASCII control range - send directly */
         case '\r': case '\n':
             out[0] = '\r'; return 1;
         case '\t':
@@ -217,7 +194,6 @@ static int key_to_bytes(const photon_key_t *k, uint8_t *out)
         case '\x7f':
             out[0] = '\x7f'; return 1;
 
-        /* cursor keys */
         case PHOTON_KEY_UP:
             memcpy(out, "\x1b[A", 3); return 3;
         case PHOTON_KEY_DOWN:
@@ -227,7 +203,6 @@ static int key_to_bytes(const photon_key_t *k, uint8_t *out)
         case PHOTON_KEY_LEFT:
             memcpy(out, "\x1b[D", 3); return 3;
 
-        /* navigation */
         case PHOTON_KEY_HOME:
             memcpy(out, "\x1b[H", 3); return 3;
         case PHOTON_KEY_END:
@@ -241,7 +216,6 @@ static int key_to_bytes(const photon_key_t *k, uint8_t *out)
         case PHOTON_KEY_DEL:
             memcpy(out, "\x1b[3~", 4); return 4;
 
-        /* function keys */
         case PHOTON_KEY_F1:  memcpy(out, "\x1bOP",   3); return 3;
         case PHOTON_KEY_F2:  memcpy(out, "\x1bOQ",   3); return 3;
         case PHOTON_KEY_F3:  memcpy(out, "\x1bOR",   3); return 3;
@@ -258,13 +232,12 @@ static int key_to_bytes(const photon_key_t *k, uint8_t *out)
         default: break;
     }
 
-    /* Plain printable ASCII (code 32-126) */
     if (k->code >= 32 && k->code <= 126) {
         out[0] = (uint8_t)k->code;
         return 1;
     }
 
-    return 0;  /* unhandled */
+    return 0;
 }
 
 /* ── Monotonic clock helper (ms) ─────────────────────────────────────── */
@@ -287,7 +260,6 @@ typedef enum {
     SESSION_MENU_XFER       =  4,
 } session_menu_result_t;
 
-/* Item renderer for the session menu list */
 static void session_draw_item(photon_ui_t *ui,
                               void *items, int index,
                               int row, int col_start, int col_end,
@@ -300,7 +272,7 @@ static void session_draw_item(photon_ui_t *ui,
 
     photon_menu_fill_rect(ui, col_start, row, col_end, row, a);
     if (selected)
-        photon_menu_put_cell(ui, col_start, row, 0x25B8, PHOTON_MENU_A_SEL_HI(t)); /* ▸ */
+        photon_menu_put_cell(ui, col_start, row, 0x25B8, PHOTON_MENU_A_SEL_HI(t));
     else
         photon_menu_put_cell(ui, col_start, row, ' ', a);
     photon_menu_put_cell(ui, col_start + 1, row, ' ', a);
@@ -387,9 +359,6 @@ static session_menu_result_t show_session_menu(photon_ui_t *ui,
 
 /* ── Scrollback viewer ───────────────────────────────────────────────── */
 
-/* Get a cell from the combined scrollback+screen buffer.
- * line is an absolute index: 0..sb_lines-1 = scrollback, sb_lines.. = live.
- * Returns false if out of range. */
 static bool sb_get_cell(vte_t *vte, int line, int col, int sb_lines,
                         int cols, vte_cell_t *row_buf, vte_cell_t *out)
 {
@@ -410,14 +379,10 @@ static bool sb_get_cell(vte_t *vte, int line, int col, int sb_lines,
     return false;
 }
 
-/* Copy text from the scrollback viewer selection to clipboard.
- * Coords are viewport-relative (0-based col, 0-based row within visible area).
- * scroll_top maps viewport rows to absolute buffer lines. */
 static void sb_copy_selection(vte_t *vte, photon_sdl_t *sdl,
                               int sc, int sr, int ec, int er,
                               int scroll_top, int sb_lines, int cols)
 {
-    /* Normalize so (sr,sc) <= (er,ec) */
     if (sr > er || (sr == er && sc > ec)) {
         int t = sr; sr = er; er = t;
         t = sc; sc = ec; ec = t;
@@ -436,7 +401,6 @@ static void sb_copy_selection(vte_t *vte, photon_sdl_t *sdl,
         int cb = (r == er) ? ec : cols - 1;
         int abs_line = scroll_top + r;
 
-        /* Find last non-space character for trimming */
         int last_nonsp = ca - 1;
         for (int c = ca; c <= cb; c++) {
             vte_cell_t cell;
@@ -474,30 +438,23 @@ static void sb_copy_selection(vte_t *vte, photon_sdl_t *sdl,
     free(row_buf);
 }
 
-/* Display the scrollback buffer.  The terminal content is not scrolled -
- * we paint scrollback lines directly over the SDL surface and let the user
- * navigate with arrow keys / PgUp / PgDn / Home / End / mouse wheel.
- * Mouse drag selects text and copies to clipboard on release.
- * ESC, Enter, or q returns to live terminal. */
 static void run_scrollback_viewer(vte_t *vte, photon_sdl_t *sdl)
 {
     int sb_lines = vte_scrollback_lines(vte);
     int screen_rows = vte_rows(vte);
-    int total = sb_lines + screen_rows;  /* scrollback + live screen */
+    int total = sb_lines + screen_rows;
     if (total <= 0) return;
 
     int cols = photon_sdl_cols(sdl);
     int rows = photon_sdl_rows(sdl);
     int cell_w = photon_sdl_cell_width(sdl);
     int cell_h = photon_sdl_cell_height(sdl);
-    int visible = rows - 1;  /* reserve bottom row for status bar */
+    int visible = rows - 1;
     if (visible < 1) visible = 1;
 
     vte_cell_t *row_buf = calloc((size_t)cols, sizeof(vte_cell_t));
     if (!row_buf) return;
 
-    /* Start at bottom (live screen visible), then scroll up 3 lines
-     * so the user immediately sees scrollback content */
     int scroll_top = total - visible;
     if (scroll_top < 0) scroll_top = 0;
     scroll_top -= 3;
@@ -506,24 +463,20 @@ static void run_scrollback_viewer(vte_t *vte, photon_sdl_t *sdl)
     bool redraw = true;
     bool done   = false;
 
-    /* Status bar colours (bright white on blue, bold) */
     vte_cell_t sb_bar_bg = { ' ', 15, 4, VTE_ATTR_BOLD };
     vte_cell_t blank = { ' ', VTE_COLOR_DEFAULT_FG, VTE_COLOR_DEFAULT_BG, 0 };
 
-    /* Clear any live-terminal selection so it doesn't bleed through */
     photon_sdl_clear_selection(sdl);
 
     while (!done) {
         if (redraw) {
             for (int r = 0; r < visible; r++) {
-                int line = scroll_top + r;  /* virtual line in combined buffer */
+                int line = scroll_top + r;
                 bool got = false;
                 if (line < sb_lines) {
-                    /* In scrollback region */
                     got = vte_scrollback_get(vte, line, row_buf, NULL);
                 } else if (line < total) {
-                    /* In live screen region */
-                    int screen_row = line - sb_lines;  /* 0-based */
+                    int screen_row = line - sb_lines;
                     for (int c = 0; c < cols; c++) {
                         vte_cell_t cell;
                         if (vte_get_cell(vte, c + 1, screen_row + 1, &cell))
@@ -542,7 +495,6 @@ static void run_scrollback_viewer(vte_t *vte, photon_sdl_t *sdl)
                 }
             }
 
-            /* Status bar on bottom row */
             char status[128];
             snprintf(status, sizeof(status),
                      " SCROLLBACK  %d/%d  Arrows  PgUp/Dn  Wheel  Home/End  ESC=exit",
@@ -559,7 +511,6 @@ static void run_scrollback_viewer(vte_t *vte, photon_sdl_t *sdl)
 
         SDL_Event ev;
         if (!SDL_WaitEventTimeout(&ev, 50)) {
-            /* No event: poll mouse to catch button-up outside the window. */
             if (photon_sdl_sel_active(sdl) &&
                 !(SDL_GetMouseState(NULL, NULL) & SDL_BUTTON(SDL_BUTTON_LEFT))) {
                 photon_sdl_clear_selection(sdl);
@@ -571,13 +522,11 @@ static void run_scrollback_viewer(vte_t *vte, photon_sdl_t *sdl)
 
         int prev_top = scroll_top;
 
-        /* Mouse wheel: scroll 3 lines per tick */
         if (ev.type == SDL_MOUSEWHEEL) {
             if (ev.wheel.y > 0)
                 scroll_top -= 3;
             else if (ev.wheel.y < 0)
                 scroll_top += 3;
-            /* Clamp */
             int max_top = total - visible;
             if (max_top < 0) max_top = 0;
             if (scroll_top < 0) scroll_top = 0;
@@ -586,7 +535,6 @@ static void run_scrollback_viewer(vte_t *vte, photon_sdl_t *sdl)
             continue;
         }
 
-        /* Mouse button down: start selection */
         if (ev.type == SDL_MOUSEBUTTONDOWN && ev.button.button == SDL_BUTTON_LEFT) {
             int mc = ev.button.x / cell_w;
             int mr = ev.button.y / cell_h;
@@ -599,7 +547,6 @@ static void run_scrollback_viewer(vte_t *vte, photon_sdl_t *sdl)
             continue;
         }
 
-        /* Mouse drag: extend selection */
         if (ev.type == SDL_MOUSEMOTION && photon_sdl_sel_active(sdl)) {
             int mc = ev.motion.x / cell_w;
             int mr = ev.motion.y / cell_h;
@@ -612,7 +559,6 @@ static void run_scrollback_viewer(vte_t *vte, photon_sdl_t *sdl)
             continue;
         }
 
-        /* Mouse button up: finalize selection and copy */
         if (ev.type == SDL_MOUSEBUTTONUP && ev.button.button == SDL_BUTTON_LEFT) {
             int mc = ev.button.x / cell_w;
             int mr = ev.button.y / cell_h;
@@ -632,7 +578,6 @@ static void run_scrollback_viewer(vte_t *vte, photon_sdl_t *sdl)
             continue;
         }
 
-        /* Window leave: clear any stale selection. */
         if (ev.type == SDL_WINDOWEVENT && ev.window.event == SDL_WINDOWEVENT_LEAVE) {
             if (photon_sdl_sel_active(sdl)) {
                 photon_sdl_clear_selection(sdl);
@@ -667,11 +612,10 @@ static void run_scrollback_viewer(vte_t *vte, photon_sdl_t *sdl)
             scroll_top = total - visible;
             break;
         default:
-            done = true;  /* any other key exits */
+            done = true;
             break;
         }
 
-        /* Clamp */
         int max_top = total - visible;
         if (max_top < 0) max_top = 0;
         if (scroll_top < 0) scroll_top = 0;
@@ -682,267 +626,186 @@ static void run_scrollback_viewer(vte_t *vte, photon_sdl_t *sdl)
 
     free(row_buf);
 
-    /* Repaint live terminal over the viewer */
     photon_sdl_repaint(sdl, vte);
     photon_sdl_present(sdl);
 }
 
-/* ── Main session loop ──────────────────────────────────────────────── */
+/* ── Public API: unified main loop helpers ──────────────────────────── */
 
-photon_term_result_t photon_doterm(vte_t *vte, photon_sdl_t *sdl,
-                                   photon_ui_t *ui, const photon_bbs_t *bbs,
-                                   photon_settings_t *settings,
-                                   const photon_tab_bar_t *tabbar)
+bool photon_term_pump_tab(vte_t *vte, photon_conn_t *conn,
+                          photon_sdl_t *sdl, bool is_active,
+                          const photon_tab_bar_t *tabbar)
 {
-    PHOTON_DBG("photon_doterm: ENTER bbs='%s'", bbs ? bbs->name : "(null)");
+    (void)sdl;
+    (void)tabbar;
 
-    /* Apply ANSI SGR 16-colour palette so SGR colours are accurate regardless
-     * of the current UI theme.  xterm-256 or overrides applied below. */
-    photon_sdl_reset_to_ansi_palette(sdl);
+    /* Drain available data from this tab's connection into its VTE.
+     * Non-blocking: returns immediately when no data is available. */
+    uint8_t buf[65536];
+    bool got_data = false;
+    int got;
+    while ((got = photon_conn_recv_for(conn, buf, sizeof(buf))) > 0) {
+        vte_input(vte, buf, (size_t)got);
+        got_data = true;
+    }
+    return got_data;
+}
 
-    photon_term_result_t result = PHOTON_TERM_DISCONNECT;
-    bool done = false;
+photon_term_result_t photon_term_check_connection(photon_conn_t *conn)
+{
+    if (!photon_conn_connected_for(conn))
+        return PHOTON_TERM_DISCONNECT;
+    return PHOTON_TERM_CONTINUE;
+}
 
-    const uint64_t FRAME_MS = 16;   /* ~60 fps render cap */
-    uint64_t last_render = 0;
-    bool     dirty       = false;
+photon_term_result_t photon_term_handle_key(const photon_key_t *k,
+                                            vte_t *vte, photon_conn_t *conn,
+                                            photon_sdl_t *sdl, photon_ui_t *ui,
+                                            const photon_bbs_t *bbs,
+                                            photon_settings_t *settings,
+                                            const photon_tab_bar_t *tabbar)
+{
+    (void)tabbar;
 
-    while (!done) {
-        bool got_data = false;
-        /* 1. Read incoming remote data and feed to VTE */
-        {
-            uint8_t buf[65536];
-            /* Drain data for up to FRAME_MS before rendering, so large output
-             * scrolls in real-time rather than buffering then dumping. */
-            uint64_t drain_deadline = now_ms() + FRAME_MS;
-            int got;
-            while ((got = photon_conn_recv(buf, sizeof(buf), 0)) > 0) {
-                vte_input(vte, buf, (size_t)got);
-                dirty = true;
-                got_data = true; /* remember we were busy; skip idle sleep */
-                if (now_ms() >= drain_deadline) break; /* render what we have */
-            }
+    if (k->code == 0)
+        return PHOTON_TERM_CONTINUE;
+
+    /* Key hook */
+    if (s_key_hook_fn &&
+        s_key_hook_fn(k, sdl, settings, s_key_hook_userdata)) {
+        return PHOTON_TERM_CONTINUE;
+    }
+
+    /* Window close */
+    if (k->code == PHOTON_KEY_QUIT)
+        return PHOTON_TERM_QUIT;
+
+    /* PageUp / scrollback */
+    if ((k->code == PHOTON_KEY_PGUP && !(k->mod & ~PHOTON_MOD_SHIFT))
+        || (k->code == PHOTON_KEY_UP && (k->mod & PHOTON_MOD_META))
+        || k->code == PHOTON_KEY_SCROLL_UP) {
+        run_scrollback_viewer(vte, sdl);
+        return PHOTON_TERM_CONTINUE;
+    }
+
+    /* Alt-Z: session menu */
+    if ((k->mod & PHOTON_MOD_ALT) && (k->code == 'z' || k->code == 'Z')) {
+        bool was_ttf = photon_sdl_get_ttf_mode(sdl);
+        uint8_t saved_pal[768];
+        photon_sdl_save_palette(sdl, saved_pal);
+        photon_sdl_set_ttf_mode(sdl, false);
+        photon_theme_apply(photon_active_theme, sdl, NULL);
+
+        if (s_session_menu_fn) {
+            photon_term_result_t mr = s_session_menu_fn(
+                ui, sdl, vte, bbs, settings, s_session_menu_userdata);
+            photon_sdl_restore_palette(sdl, saved_pal);
+            photon_sdl_set_ttf_mode(sdl, was_ttf);
+            if (mr == PHOTON_TERM_RESUME)
+                return PHOTON_TERM_CONTINUE;
+            return mr;
         }
 
-        /* 2. Connection drop detection */
-        if (!photon_conn_connected()) {
-            PHOTON_DBG("photon_doterm: connection dropped");
-            result = PHOTON_TERM_DISCONNECT;
-            done   = true;
-            break;
-        }
+        session_menu_result_t m = show_session_menu(ui, sdl, vte, bbs, settings);
 
-        /* 3. Window resize detection */
-        {
-            int nc, nr;
-            if (photon_sdl_check_resize(sdl, &nc, &nr)) {
-                PHOTON_DBG("photon_doterm: window resize -> %dx%d", nc, nr);
-                vte_resize(vte, nc, nr);
-                photon_conn_resize(nc, nr);
-                /* Also resize the UI VTE so menus re-center on the new grid */
-                vte_t *ui_vte = photon_ui_vte(ui);
-                if (ui_vte && ui_vte != vte)
-                    vte_resize(ui_vte, nc, nr);
-                dirty = true;
-            }
-        }
-
-        /* 4. Process keyboard / window events */
-        {
-            photon_key_t k;
-            while (!done && photon_sdl_poll_key(sdl, &k)) {
-                /* Key hook: let host app intercept before we process */
-                if (s_key_hook_fn &&
-                    s_key_hook_fn(&k, sdl, settings, s_key_hook_userdata)) {
-                    dirty = true;
-                    continue;
+        photon_sdl_restore_palette(sdl, saved_pal);
+        photon_sdl_set_ttf_mode(sdl, was_ttf);
+        switch (m) {
+            case SESSION_MENU_DISCONNECT:
+                return PHOTON_TERM_DISCONNECT;
+            case SESSION_MENU_NEWTAB:
+                return PHOTON_TERM_NEWTAB;
+            case SESSION_MENU_QUIT:
+                return PHOTON_TERM_QUIT;
+            case SESSION_MENU_SETTINGS:
+                if (settings) {
+                    photon_bbslist_run_settings(ui, settings);
+                    photon_theme_apply(photon_active_theme, sdl, settings);
                 }
-
-                /* Window close button */
-                if (k.code == PHOTON_KEY_QUIT) {
-                    result = PHOTON_TERM_QUIT;
-                    done   = true;
-                    break;
-                }
-
-                /* PageUp (optionally with Shift), Cmd+Up, or mouse wheel up:
-                 * open scrollback viewer */
-                if ((k.code == PHOTON_KEY_PGUP && !(k.mod & ~PHOTON_MOD_SHIFT))
-                    || (k.code == PHOTON_KEY_UP && (k.mod & PHOTON_MOD_META))
-                    || k.code == PHOTON_KEY_SCROLL_UP) {
-                    run_scrollback_viewer(vte, sdl);
-                    dirty = true;
-                    continue;
-                }
-
-                /* Alt-Z: in-session options menu */
-                if ((k.mod & PHOTON_MOD_ALT) && (k.code == 'z' || k.code == 'Z')) {
-                    /* Save rendering state so the menu uses theme colours
-                     * and bitmap font, then restore after. */
-                    bool was_ttf = photon_sdl_get_ttf_mode(sdl);
-                    uint8_t saved_pal[768];
-                    photon_sdl_save_palette(sdl, saved_pal);
-                    photon_sdl_set_ttf_mode(sdl, false);
-                    photon_theme_apply(photon_active_theme, sdl, NULL);
-
-                    /* Use custom session menu if host app registered one */
-                    if (s_session_menu_fn) {
-                        photon_term_result_t mr = s_session_menu_fn(
-                            ui, sdl, vte, bbs, settings, s_session_menu_userdata);
-                        photon_sdl_restore_palette(sdl, saved_pal);
-                        photon_sdl_set_ttf_mode(sdl, was_ttf);
-                        if (mr == PHOTON_TERM_RESUME) {
-                            dirty = true;
-                        } else {
-                            result = mr;
-                            done   = true;
-                        }
-                        break;
-                    }
-
-                    session_menu_result_t m = show_session_menu(ui, sdl, vte, bbs, settings);
-
-                    photon_sdl_restore_palette(sdl, saved_pal);
-                    photon_sdl_set_ttf_mode(sdl, was_ttf);
-                    switch (m) {
-                        case SESSION_MENU_DISCONNECT:
-                            result = PHOTON_TERM_DISCONNECT;
-                            done   = true;
-                            break;
-                        case SESSION_MENU_NEWTAB:
-                            result = PHOTON_TERM_NEWTAB;
-                            done   = true;
-                            break;
-                        case SESSION_MENU_QUIT:
-                            result = PHOTON_TERM_QUIT;
-                            done   = true;
-                            break;
-                        case SESSION_MENU_SETTINGS:
-                            if (settings) {
-                                photon_bbslist_run_settings(ui, settings);
-                                /* Re-apply theme in case user changed it */
-                                photon_theme_apply(photon_active_theme, sdl, settings);
-                            }
-                            photon_sdl_invalidate(sdl);
-                            dirty = true;
-                            break;
-                        case SESSION_MENU_XFER:
-                            photon_xfer_run(photon_conn_get_active(), sdl, ui);
-                            photon_sdl_invalidate(sdl);
-                            photon_sdl_repaint(sdl, vte);
-                            dirty = true;
-                            break;
-                        default:
-                            photon_sdl_invalidate(sdl);
-                            dirty = true;   /* menu closed, repaint terminal */
-                            break;
-                    }
-                    break;  /* restart key loop after menu */
-                }
-
-                /* Alt-W: open new tab (shortcut) */
-                if ((k.mod & PHOTON_MOD_ALT) && (k.code == 'w' || k.code == 'W')) {
-                    result = PHOTON_TERM_NEWTAB;
-                    done   = true;
-                    break;
-                }
-
-                /* Alt-1..9: switch to tab N */
-                if ((k.mod & PHOTON_MOD_ALT) && k.code >= '1' && k.code <= '9') {
-                    photon_switch_tab_target = k.code - '1';  /* 0-based */
-                    result = PHOTON_TERM_SWITCH_TAB;
-                    done   = true;
-                    break;
-                }
-
-                /* Ctrl-\ (ASCII 0x1c): force disconnect */
-                if ((k.mod & PHOTON_MOD_CTRL) && k.code == '\\') {
-                    PHOTON_DBG("photon_doterm: Ctrl-\\ force disconnect");
-                    result = PHOTON_TERM_DISCONNECT;
-                    done   = true;
-                    break;
-                }
-
-                /* Cmd+V (macOS) or Ctrl+Shift+V (Linux/Win): paste clipboard */
-                bool is_paste = ((k.mod & PHOTON_MOD_META) && (k.code == 'v' || k.code == 'V'))
-                             || ((k.mod & PHOTON_MOD_CTRL) && (k.mod & PHOTON_MOD_SHIFT)
-                                 && (k.code == 'v' || k.code == 'V'))
-                             || (k.code == PHOTON_KEY_PASTE);
-                if (is_paste) {
-                    char *clip = SDL_GetClipboardText();
-                    if (clip && clip[0]) {
-                        photon_conn_send((const uint8_t *)clip, strlen(clip), 2000);
-                        dirty = true;
-                    }
-                    SDL_free(clip);
-                    continue;
-                }
-
-                /* Mouse selection complete: copy to clipboard */
-                if (k.code == PHOTON_KEY_COPY_SEL) {
-                    copy_selection_to_clipboard(vte, sdl);
-                    dirty = true;   /* repaint to clear highlight */
-                    continue;
-                }
-
-                /* Any regular keypress clears the mouse selection */
-                if (photon_sdl_get_selection(sdl, NULL, NULL, NULL, NULL)) {
-                    photon_sdl_clear_selection(sdl);
-                    dirty = true;
-                }
-
-                /* Translate and send to remote */
-                uint8_t seq[SEQ_MAX];
-                int seqlen = key_to_bytes(&k, seq);
-                if (seqlen > 0)
-                    photon_conn_send(seq, (size_t)seqlen, 1000);
-            }
-        }
-
-        /* 5. Render if dirty, frame timer expired, or mouse selection is live */
-        {
-            uint64_t t = now_ms();
-            bool sel_live = photon_sdl_sel_active(sdl);
-            bool alt_held = (SDL_GetModState() & (KMOD_LALT | KMOD_RALT)) != 0;
-
-            /* Render when content actually changed, or when the mouse
-             * selection is being dragged (needs continuous update).
-             * Safety-net refresh every 500ms handles edge cases (window
-             * expose without SDL event, etc.) while staying idle-friendly
-             * on low-spec hardware (e.g. 8th-gen Intel iGPU). */
-            if (dirty || got_data || sel_live || (t - last_render) >= FRAME_MS) {
+                photon_sdl_invalidate(sdl);
+                return PHOTON_TERM_CONTINUE;
+            case SESSION_MENU_XFER:
+                photon_conn_set_active(conn);
+                photon_xfer_run(conn, sdl, ui);
+                photon_sdl_invalidate(sdl);
                 photon_sdl_repaint(sdl, vte);
-                /* Alt-tab overlay: draw on texture, but invalidate the tab
-                 * bar row when Alt is released so repaint erases it. */
-                if (alt_held && tabbar && tabbar->ntabs > 1) {
-                    draw_alt_overlay(sdl, tabbar);
-                    alt_overlay_active = true;
-                } else if (alt_overlay_active) {
-                    /* Alt released: invalidate last row so repaint erases overlay */
-                    photon_sdl_invalidate_range(sdl,
-                        photon_sdl_rows(sdl) - 1, photon_sdl_rows(sdl) - 1);
-                    alt_overlay_active = false;
-                    dirty = true;
-                }
-                if (s_render_overlay_fn)
-                    s_render_overlay_fn(sdl, vte, s_render_overlay_userdata);
-                photon_sdl_present(sdl);
-                last_render = t;
-                dirty       = false;
-            }
-        }
-
-        /* 6. Short sleep to avoid busy-spin */
-        if (!got_data && !dirty) {
-            SDL_Delay(8);  /* 8ms idle sleep (~125 Hz), portable across platforms */
+                return PHOTON_TERM_CONTINUE;
+            default:
+                photon_sdl_invalidate(sdl);
+                return PHOTON_TERM_CONTINUE;
         }
     }
 
-    /* Final repaint before returning */
-    photon_sdl_invalidate(sdl);
-    photon_sdl_repaint(sdl, vte);
-    photon_sdl_present(sdl);
+    /* Alt-W: new tab */
+    if ((k->mod & PHOTON_MOD_ALT) && (k->code == 'w' || k->code == 'W'))
+        return PHOTON_TERM_NEWTAB;
 
-    PHOTON_DBG("photon_doterm: EXIT result=%d", (int)result);
-    return result;
+    /* Alt-1..9: switch tab */
+    if ((k->mod & PHOTON_MOD_ALT) && k->code >= '1' && k->code <= '9') {
+        photon_switch_tab_target = k->code - '1';
+        return PHOTON_TERM_SWITCH_TAB;
+    }
+
+    /* Ctrl-\: force disconnect */
+    if ((k->mod & PHOTON_MOD_CTRL) && k->code == '\\') {
+        PHOTON_DBG("force disconnect via Ctrl-\\");
+        return PHOTON_TERM_DISCONNECT;
+    }
+
+    /* Paste */
+    bool is_paste = ((k->mod & PHOTON_MOD_META) && (k->code == 'v' || k->code == 'V'))
+                 || ((k->mod & PHOTON_MOD_CTRL) && (k->mod & PHOTON_MOD_SHIFT)
+                     && (k->code == 'v' || k->code == 'V'))
+                 || (k->code == PHOTON_KEY_PASTE);
+    if (is_paste) {
+        char *clip = SDL_GetClipboardText();
+        if (clip && clip[0]) {
+            photon_conn_send_for(conn, (const uint8_t *)clip, strlen(clip));
+        }
+        SDL_free(clip);
+        return PHOTON_TERM_CONTINUE;
+    }
+
+    /* Mouse selection copy */
+    if (k->code == PHOTON_KEY_COPY_SEL) {
+        copy_selection_to_clipboard(vte, sdl);
+        return PHOTON_TERM_CONTINUE;
+    }
+
+    /* Any keypress clears mouse selection */
+    if (photon_sdl_get_selection(sdl, NULL, NULL, NULL, NULL)) {
+        photon_sdl_clear_selection(sdl);
+    }
+
+    /* Translate and send to remote */
+    uint8_t seq[SEQ_MAX];
+    int seqlen = key_to_bytes(k, seq);
+    if (seqlen > 0)
+        photon_conn_send_for(conn, seq, (size_t)seqlen);
+
+    return PHOTON_TERM_CONTINUE;
+}
+
+void photon_term_render(photon_sdl_t *sdl, vte_t *vte,
+                        const photon_tab_bar_t *tabbar, bool dirty)
+{
+    uint64_t t = now_ms();
+    bool sel_live = photon_sdl_sel_active(sdl);
+    bool alt_held = (SDL_GetModState() & (KMOD_LALT | KMOD_RALT)) != 0;
+
+    if (dirty || sel_live || (t - s_last_render) >= FRAME_MS) {
+        photon_sdl_repaint(sdl, vte);
+        if (alt_held && tabbar && tabbar->ntabs > 1) {
+            draw_alt_overlay(sdl, tabbar);
+            alt_overlay_active = true;
+        } else if (alt_overlay_active) {
+            photon_sdl_invalidate_range(sdl,
+                photon_sdl_rows(sdl) - 1, photon_sdl_rows(sdl) - 1);
+            alt_overlay_active = false;
+        }
+        if (s_render_overlay_fn)
+            s_render_overlay_fn(sdl, vte, s_render_overlay_userdata);
+        photon_sdl_present(sdl);
+        s_last_render = t;
+    }
 }

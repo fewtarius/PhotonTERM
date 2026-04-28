@@ -88,6 +88,24 @@ void photon_conn_set_active(photon_conn_t *C);
 /* Return the currently active handle. */
 photon_conn_t *photon_conn_get_active(void);
 
+/* ── Per-connection API (no s_active needed) ─────────────────────────── */
+
+/* Check if a specific connection is live (I/O threads running). */
+bool   photon_conn_connected_for(photon_conn_t *C);
+
+/* Return bytes waiting in a specific connection's input ring. */
+size_t photon_conn_data_waiting_for(photon_conn_t *C);
+
+/* Non-blocking read from a specific connection.  Returns bytes read, 0 if
+ * none available, -1 on error. */
+int    photon_conn_recv_for(photon_conn_t *C, void *buf, size_t buflen);
+
+/* Send data on a specific connection.  Returns bytes sent, -1 on error. */
+int    photon_conn_send_for(photon_conn_t *C, const void *buf, size_t buflen);
+
+/* Resize the terminal on a specific connection. */
+void   photon_conn_resize_for(photon_conn_t *C, int cols, int rows);
+
 /* Set a callback that is invoked to prompt the user for an SSH password.
  * The callback should return true if the user entered something, false to cancel.
  * Call with NULL,NULL to clear. */

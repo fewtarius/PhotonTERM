@@ -3,22 +3,12 @@
  * Copyright (C) 2026 fewtarius and PhotonTERM contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
  *
- * This is the single entry point for PhotonTERM.  It uses:
- *   photon_sdl    - SDL2 + SDL2_ttf rendering
- *   photon_vte    - VTE terminal emulator
- *   photon_ui     - text UI
- *   photon_bbslist - dialing directory
- *   photon_conn   - network transport (telnet + SSH)
- *   photon_term   - terminal session loop
+ * Unified main loop: all tabs are pumped concurrently, only the active
+ * tab renders.  SDL events are processed every iteration so tab switching
+ * and UI interactions are always responsive regardless of connection load.
  *
  * On macOS, SDL2 is linked as a framework and SDL_main.h redirects
  * main() -> SDL_main().  We include SDL.h here to pick that up.
- *
- * Multi-tab:
- *   Up to PHOTON_MAX_TABS simultaneous sessions.  Each tab has its own
- *   vte_t and photon_conn_t.  Background connections keep running; the
- *   active tab's VTE drives the display.  Alt-W opens a new tab from the
- *   BBS directory.  Alt-1..9 switches tabs.  Closing all tabs exits.
  */
 
 #include "photon_compat.h"
@@ -32,13 +22,14 @@
 
 /* ── VTE response callback ───────────────────────────────────────────── */
 
-/* Called by the VTE when it needs to send a response to the remote (e.g.
-   DA response to ESC[c, CPR to ESC[6n, etc.)
-   We only feed data into the active tab's VTE, so s_active is always correct. */
+/* Called by the VTE when it needs to send a response to the remote.
+ * Since each tab feeds its own VTE, we need per-tab response routing.
+ * The main loop sets s_active before pumping each tab. */
 static void conn_vte_response(vte_t *vte, const char *data, size_t len, void *user)
 {
     (void)vte;
     (void)user;
+    /* s_active is already set to this tab's conn by the pump loop */
     if (len > 0)
         photon_conn_send((const uint8_t *)data, len, 500);
 }
@@ -51,7 +42,7 @@ static void photon_vte_title_cb(vte_t *vte, const char *title, void *user)
 }
 
 /* BEL callback: visual flash (if bell is enabled in settings). */
-bool g_bell_enabled = true;  /* updated from settings at startup; exported */
+bool g_bell_enabled = true;
 
 static void photon_vte_bell_cb(vte_t *vte, void *user)
 {
@@ -112,29 +103,25 @@ typedef struct {
     photon_conn_t  *conn;
     vte_t          *vte;
     photon_bbs_t   *bbs;
-    char            name[64];   /* display name for tab bar */
+    char            name[64];
     bool            active;     /* slot in use */
     bool            activity;   /* unseen output since last focus */
+    bool            dirty;      /* VTE content changed, needs render */
 } photon_tab_t;
 
 static photon_tab_t tabs[PHOTON_MAX_TABS];
 static int          ntabs      = 0;
 static int          active_tab = 0;  /* 0-based */
 
-/* Tab bar: rendered as a one-line strip at the bottom of the window.
- * Shows [1:Name] [2:Other*] where * = unread activity.
- * Colours: active tab bright-white on blue; others white on black. */
+/* Render the tab bar (bottom row) for the active tab list. */
 static void render_tab_bar(photon_sdl_t *sdl)
 {
-    if (ntabs <= 1) return;  /* no bar if only one tab */
+    if (ntabs <= 1) return;
 
     int cols = photon_sdl_cols(sdl);
     int rows = photon_sdl_rows(sdl);
-
-    /* Use bottom row for tab bar */
     int bar_row = rows;
 
-    /* Draw each tab label */
     int col = 1;
     for (int i = 0; i < ntabs; i++) {
         if (!tabs[i].active) continue;
@@ -144,77 +131,69 @@ static void render_tab_bar(photon_sdl_t *sdl)
                  tabs[i].activity ? "*" : "");
 
         bool is_active = (i == active_tab);
-        /* Active: bright-white (15) on blue (4); others: white (7) on black (0) */
-        uint8_t fg = is_active ? 15 : 7;
-        uint8_t bg = is_active ?  4 : 0;
-        uint8_t attr = is_active ? VTE_ATTR_BOLD : 0;
+        uint8_t fg  = is_active ? 15 : 7;
+        uint8_t bg  = is_active ?  4 : 0;
+        uint8_t att = is_active ? VTE_ATTR_BOLD : 0;
 
         for (int j = 0; label[j] && col <= cols; j++, col++) {
-            vte_cell_t cell = { (uint32_t)(unsigned char)label[j], fg, bg, attr };
+            vte_cell_t cell = { (uint32_t)(unsigned char)label[j], fg, bg, att };
             photon_sdl_draw_cell(sdl, col, bar_row, &cell);
         }
-
-        /* Space separator */
         if (col <= cols) {
             vte_cell_t sp = { ' ', 7, 0, 0 };
             photon_sdl_draw_cell(sdl, col++, bar_row, &sp);
         }
     }
-
-    /* Fill remainder of bar row with blanks */
     while (col <= cols) {
         vte_cell_t blank = { ' ', 7, 0, 0 };
         photon_sdl_draw_cell(sdl, col++, bar_row, &blank);
     }
-
     photon_sdl_present(sdl);
 }
 
-/* Switch active tab to idx (0-based).  Repaints the screen from the
- * new tab's VTE buffer and updates the connection handle. */
-static void switch_tab(photon_sdl_t *sdl, photon_settings_t *settings,
-                        int idx)
+/* Build tab bar info struct for passing to photon_term functions. */
+static photon_tab_bar_t build_tab_bar(void)
+{
+    photon_tab_bar_t tb = { .ntabs = ntabs, .active = active_tab };
+    for (int i = 0; i < ntabs && i < PHOTON_TAB_BAR_MAX; i++) {
+        strlcpy(tb.names[i], tabs[i].name, sizeof(tb.names[0]));
+        tb.activity[i] = tabs[i].activity;
+    }
+    return tb;
+}
+
+/* Switch active tab to idx (0-based). */
+static void switch_tab(photon_sdl_t *sdl, photon_settings_t *settings, int idx)
 {
     if (idx < 0 || idx >= PHOTON_MAX_TABS || !tabs[idx].active) return;
     if (idx == active_tab) return;
 
-    tabs[active_tab].activity = false;  /* clear activity on old tab on leave */
+    tabs[active_tab].activity = false;
     active_tab = idx;
-    tabs[active_tab].activity = false;  /* clear activity on new tab */
+    tabs[active_tab].activity = false;
 
     /* Switch connection */
     photon_conn_set_active(tabs[active_tab].conn);
 
     /* Reapply render mode for this tab */
     {
-        photon_settings_t *s = settings;
         photon_bbs_t *bbs = tabs[active_tab].bbs;
         bool ttf;
         if (bbs->term_mode == PHOTON_TERM_MODE_AUTO)
             ttf = (bbs->conn_type == PHOTON_CONN_SHELL)
-                  || (s->font_mode == PHOTON_FONT_TTF);
+                  || (settings->font_mode == PHOTON_FONT_TTF);
         else
             ttf = (bbs->term_mode == PHOTON_TERM_MODE_UTF8);
         photon_sdl_set_ttf_mode(sdl, ttf);
 
-        /* Reapply palette mode */
         photon_palette_mode_t pm = (bbs->palette_mode != PHOTON_PALETTE_AUTO)
                                    ? bbs->palette_mode
-                                   : s->default_palette_mode;
+                                   : settings->default_palette_mode;
         photon_sdl_apply_palette_mode(sdl, pm, bbs->conn_type);
     }
 
-    /* Clear the render target to black so no content from the old tab bleeds
-     * through on the new tab (new tab may have fewer cells filled).
-     * photon_sdl_clear() shows the black frame immediately, then invalidate
-     * so the next repaint overwrites everything from scratch. */
     photon_sdl_clear(sdl);
-
-    /* Invalidate the shadow buffer so every cell of the new tab gets redrawn
-     * on the next repaint. */
     photon_sdl_invalidate(sdl);
-
-    /* Repaint from VTE buffer */
     vte_repaint(tabs[active_tab].vte);
     render_tab_bar(sdl);
     photon_sdl_present(sdl);
@@ -233,43 +212,135 @@ static void close_tab(photon_sdl_t *sdl, int idx)
     memset(&tabs[idx], 0, sizeof(tabs[idx]));
     ntabs--;
 
-    /* Compact the array: shift live tabs left to fill the gap */
     for (int i = idx; i < PHOTON_MAX_TABS - 1; i++)
         tabs[i] = tabs[i + 1];
     memset(&tabs[PHOTON_MAX_TABS - 1], 0, sizeof(tabs[0]));
 
-    /* Adjust active_tab */
     if (active_tab >= ntabs) active_tab = ntabs - 1;
     if (active_tab < 0)      active_tab = 0;
 
-    /* Restore correct connection context */
     if (ntabs > 0)
         photon_conn_set_active(tabs[active_tab].conn);
 
     (void)sdl;
 }
 
+/* ── Connection creation helper ──────────────────────────────────────── */
+
+/* Create and connect a new tab.  Returns the slot index, or -1 on failure.
+ * On failure, the caller is responsible for showing an error and resuming. */
+static int create_and_connect_tab(photon_sdl_t *sdl, photon_ui_t *ui,
+                                  photon_settings_t *settings,
+                                  photon_bbs_t *bbs, vte_t *ui_vte)
+{
+    if (ntabs >= PHOTON_MAX_TABS) {
+        photon_ui_msg(ui, "Maximum number of tabs open.");
+        photon_bbslist_free(bbs);
+        return -1;
+    }
+
+    vte_callbacks_t cbs = photon_sdl_make_vte_callbacks(sdl);
+    cbs.response = conn_vte_response;
+    cbs.title    = photon_vte_title_cb;
+    cbs.bell     = photon_vte_bell_cb;
+
+    bool use_cp437;
+    if (bbs->term_mode == PHOTON_TERM_MODE_AUTO)
+        use_cp437 = (bbs->conn_type != PHOTON_CONN_SHELL);
+    else
+        use_cp437 = (bbs->term_mode == PHOTON_TERM_MODE_CP437);
+
+    vte_t *vte = vte_create(80, 24, 1000, &cbs, use_cp437);
+    if (!vte) {
+        photon_ui_msg(ui, "Failed to create terminal emulator.");
+        photon_bbslist_free(bbs);
+        return -1;
+    }
+
+    photon_conn_t *conn = photon_conn_new();
+    if (!conn) {
+        photon_ui_msg(ui, "Out of memory.");
+        vte_free(vte);
+        photon_bbslist_free(bbs);
+        return -1;
+    }
+
+    int slot = ntabs;
+    tabs[slot].conn     = conn;
+    tabs[slot].vte      = vte;
+    tabs[slot].bbs      = bbs;
+    tabs[slot].active   = true;
+    tabs[slot].activity = false;
+    tabs[slot].dirty    = false;
+    strlcpy(tabs[slot].name, bbs->name[0] ? bbs->name : "New Tab",
+            sizeof(tabs[slot].name));
+    active_tab = slot;
+    ntabs++;
+
+    /* Auto-detect window size */
+    if (settings->cols == 0 && settings->rows == 0) {
+        int nc = photon_sdl_cols(sdl);
+        int nr = photon_sdl_rows(sdl);
+        bbs->init_cols = nc;
+        bbs->init_rows = nr;
+        vte_resize(vte, nc, nr);
+    }
+
+    PHOTON_DBG("tab %d: connecting to '%s' %s:%u type=%d",
+               slot, bbs->name, bbs->addr, bbs->port, bbs->conn_type);
+
+    /* Apply per-BBS render mode */
+    {
+        bool ttf;
+        if (bbs->term_mode == PHOTON_TERM_MODE_AUTO)
+            ttf = (bbs->conn_type == PHOTON_CONN_SHELL)
+                  || (settings->font_mode == PHOTON_FONT_TTF);
+        else
+            ttf = (bbs->term_mode == PHOTON_TERM_MODE_UTF8);
+        photon_sdl_set_ttf_mode(sdl, ttf);
+
+        photon_palette_mode_t pm = (bbs->palette_mode != PHOTON_PALETTE_AUTO)
+                                   ? bbs->palette_mode
+                                   : settings->default_palette_mode;
+        photon_sdl_apply_palette_mode(sdl, pm, bbs->conn_type);
+    }
+
+    photon_conn_set_active(conn);
+    photon_sdl_show_connecting(sdl, bbs->name);
+
+    if (!photon_conn_connect(bbs)) {
+        char errmsg[256];
+        snprintf(errmsg, sizeof(errmsg), "Connection failed: %s",
+                 photon_conn_last_error());
+        close_tab(sdl, slot);
+        photon_theme_apply(photon_active_theme, sdl, settings);
+        photon_sdl_set_ttf_mode(sdl, false);
+        photon_ui_msg(ui, errmsg);
+        return -1;
+    }
+
+    PHOTON_DBG("tab %d: connected", slot);
+    render_tab_bar(sdl);
+    return slot;
+}
+
 /* ── Entry point ─────────────────────────────────────────────────────── */
 
 int main(int argc, char **argv)
 {
-    /* First pass: --debug flag (before SDL init so debug covers everything) */
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--debug") == 0) {
             photon_debug_enabled = true;
             photon_debug_open();
         }
     }
-    PHOTON_DBG("PhotonTERM start (photon stack) argc=%d", argc);
+    PHOTON_DBG("PhotonTERM start (unified main loop) argc=%d", argc);
 
-    /* Suppress SDL SIGINT handler before SDL_Init */
 #ifndef _WIN32
     setenv("SDL_NO_SIGNAL_HANDLERS", "1", 1);
     ignore_signals();
 #endif
 
-    /* Initialise SDL2 (must be done before photon_sdl_create) */
-    /* Init VIDEO+EVENTS first; audio is optional (BEL only) */
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) != 0) {
         fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
         return 1;
@@ -281,7 +352,6 @@ int main(int argc, char **argv)
     }
     PHOTON_DBG("SDL_Init OK");
 
-    /* Create SDL rendering context */
     photon_sdl_t *sdl = photon_sdl_create("PhotonTERM", 80, 24, NULL, 32);
     if (!sdl) {
         fprintf(stderr, "photon_sdl_create failed: %s\n",
@@ -292,8 +362,7 @@ int main(int argc, char **argv)
     photon_sdl_global = sdl;
     PHOTON_DBG("SDL context created");
 
-    /* Create UI context (shared across all tabs) */
-    /* We create a dummy VTE for the UI; each tab has its own VTE. */
+    /* UI VTE (for directory/settings overlays) */
     vte_callbacks_t dummy_cbs = photon_sdl_make_vte_callbacks(sdl);
     dummy_cbs.response = conn_vte_response;
     vte_t *ui_vte = vte_create(80, 24, 1000, &dummy_cbs, false);
@@ -316,7 +385,6 @@ int main(int argc, char **argv)
     photon_conn_set_ssh_prompt(ssh_password_prompt, NULL);
     PHOTON_DBG("UI context created");
 
-    /* Load settings and apply theme */
     photon_settings_t settings;
     photon_settings_load(&settings);
     photon_sdl_set_fixed_size(sdl, settings.cols, settings.rows);
@@ -326,195 +394,172 @@ int main(int argc, char **argv)
     }
     g_bell_enabled = settings.bell_enabled;
 
-    /* ── Main loop ───────────────────────────────────────────────────── */
+    /* ── State machine ────────────────────────────────────────────────── */
     memset(tabs, 0, sizeof(tabs));
 
-    bool running = true;
-    bool show_directory = false;  /* true = skip splash, open directory directly */
+    typedef enum {
+        STATE_DIRECTORY,   /* showing BBS directory / connecting */
+        STATE_RUNNING,     /* unified main loop pumping all tabs */
+        STATE_SHUTDOWN     /* exiting */
+    } app_state_t;
+
+    app_state_t state = STATE_DIRECTORY;
+    bool show_directory = false;
     photon_bbs_t reselect_bbs;
     bool has_reselect = false;
     memset(&reselect_bbs, 0, sizeof(reselect_bbs));
-    while (running) {
 
-        /* Show BBS list to pick a connection */
-        photon_bbs_t *bbs = photon_bbslist_run(ui, show_directory,
-                                                has_reselect ? &reselect_bbs : NULL);
-        show_directory = false;  /* reset: only skip splash for the next call */
-        has_reselect = false;
-        /* Settings may have changed in the directory (terminal size, etc.) */
-        photon_sdl_set_fixed_size(sdl, settings.cols, settings.rows);
-        if (!bbs) {
-            PHOTON_DBG("user cancelled BBS list");
-            if (ntabs == 0) break;  /* no tabs open -> exit */
-            /* Switch to last active tab instead of exiting */
-            switch_tab(sdl, &settings, active_tab);
-            /* Fall through to run session for current tab */
-            goto run_session;
-        }
+    while (state != STATE_SHUTDOWN) {
 
-        /* Find a free tab slot */
-        if (ntabs >= PHOTON_MAX_TABS) {
-            photon_ui_msg(ui, "Maximum number of tabs open.");
-            photon_bbslist_free(bbs);
-            if (ntabs > 0) goto run_session;
-            break;
-        }
+        if (state == STATE_DIRECTORY) {
+            /* ── BBS Directory ─────────────────────────────────────── */
+            photon_bbs_t *bbs = photon_bbslist_run(ui, show_directory,
+                                                    has_reselect ? &reselect_bbs : NULL);
+            show_directory  = false;
+            has_reselect    = false;
+            photon_sdl_set_fixed_size(sdl, settings.cols, settings.rows);
 
-        /* Create VTE for this tab */
-        vte_callbacks_t cbs = photon_sdl_make_vte_callbacks(sdl);
-        cbs.response = conn_vte_response;
-        /* Wire OSC title and BEL callbacks */
-        cbs.title = photon_vte_title_cb;
-        cbs.bell  = photon_vte_bell_cb;
-        /* CP437 mode: respect user's term_mode setting.  AUTO uses CP437
-         * for Telnet/SSH (raw 8-bit ANSI art) and UTF-8 for local shell. */
-        bool use_cp437;
-        if (bbs->term_mode == PHOTON_TERM_MODE_AUTO)
-            use_cp437 = (bbs->conn_type != PHOTON_CONN_SHELL);
-        else
-            use_cp437 = (bbs->term_mode == PHOTON_TERM_MODE_CP437);
-        vte_t *vte = vte_create(80, 24, 1000, &cbs, use_cp437);
-        if (!vte) {
-            photon_ui_msg(ui, "Failed to create terminal emulator.");
-            photon_bbslist_free(bbs);
-            if (ntabs > 0) goto run_session;
-            break;
-        }
-
-        /* Create connection handle */
-        photon_conn_t *conn = photon_conn_new();
-        if (!conn) {
-            photon_ui_msg(ui, "Out of memory.");
-            vte_free(vte);
-            photon_bbslist_free(bbs);
-            if (ntabs > 0) goto run_session;
-            break;
-        }
-
-        /* Find a free slot (should always be ntabs since we checked above) */
-        int slot = ntabs;
-        tabs[slot].conn     = conn;
-        tabs[slot].vte      = vte;
-        tabs[slot].bbs      = bbs;
-        tabs[slot].active   = true;
-        tabs[slot].activity = false;
-        strlcpy(tabs[slot].name, bbs->name[0] ? bbs->name : "New Tab",
-                sizeof(tabs[slot].name));
-        active_tab = slot;
-        ntabs++;
-
-        /* Auto-detect: if settings.cols/rows are 0, use the current SDL window
-         * grid so the session starts at the window's actual size. */
-        if (settings.cols == 0 && settings.rows == 0) {
-            int nc = photon_sdl_cols(sdl);
-            int nr = photon_sdl_rows(sdl);
-            bbs->init_cols = nc;
-            bbs->init_rows = nr;
-            vte_resize(vte, nc, nr);
-        }
-
-        PHOTON_DBG("tab %d: connecting to '%s' %s:%u type=%d",
-                   slot, bbs->name, bbs->addr, bbs->port, bbs->conn_type);
-
-        /* Apply per-BBS render mode */
-        {
-            bool ttf;
-            if (bbs->term_mode == PHOTON_TERM_MODE_AUTO)
-                ttf = (bbs->conn_type == PHOTON_CONN_SHELL)
-                      || (settings.font_mode == PHOTON_FONT_TTF);
-            else
-                ttf = (bbs->term_mode == PHOTON_TERM_MODE_UTF8);
-            photon_sdl_set_ttf_mode(sdl, ttf);
-
-            /* Apply per-BBS palette mode (AUTO resolves by conn_type) */
-            photon_palette_mode_t pm = (bbs->palette_mode != PHOTON_PALETTE_AUTO)
-                                       ? bbs->palette_mode
-                                       : settings.default_palette_mode;
-            photon_sdl_apply_palette_mode(sdl, pm, bbs->conn_type);
-        }
-
-        /* Make this conn active and connect */
-        photon_conn_set_active(conn);
-        photon_sdl_show_connecting(sdl, bbs->name);
-
-        if (!photon_conn_connect(bbs)) {
-            char errmsg[256];
-            snprintf(errmsg, sizeof(errmsg), "Connection failed: %s",
-                     photon_conn_last_error());
-            close_tab(sdl, slot);
-            /* Restore theme */
-            photon_theme_apply(photon_active_theme, sdl, &settings);
-            photon_sdl_set_ttf_mode(sdl, false);  /* reset to bitmap for UI */
-            photon_ui_msg(ui, errmsg);
-            if (ntabs > 0) goto run_session;
-            continue;
-        }
-        PHOTON_DBG("tab %d: connected", slot);
-        render_tab_bar(sdl);
-
-    run_session:;
-        /* Build tab bar info for Alt overlay */
-        photon_tab_bar_t tabbar = { .ntabs = ntabs, .active = active_tab };
-        for (int _ti = 0; _ti < ntabs && _ti < PHOTON_TAB_BAR_MAX; _ti++) {
-            strlcpy(tabbar.names[_ti], tabs[_ti].name, sizeof(tabbar.names[0]));
-            tabbar.activity[_ti] = tabs[_ti].activity;
-        }
-
-        /* Run the terminal loop for the active tab */
-        photon_term_result_t r = photon_doterm(
-            tabs[active_tab].vte, sdl, ui,
-            tabs[active_tab].bbs, &settings, &tabbar);
-        PHOTON_DBG("tab %d: doterm returned %d", active_tab, (int)r);
-
-        switch (r) {
-        case PHOTON_TERM_QUIT:
-            running = false;
-            break;
-
-        case PHOTON_TERM_DISCONNECT:
-            /* Save BBS info for re-selection before closing tab */
-            if (tabs[active_tab].bbs) {
-                reselect_bbs = *tabs[active_tab].bbs;
-                has_reselect = true;
-            }
-            /* Session ended - close this tab */
-            close_tab(sdl, active_tab);
-            photon_theme_apply(photon_active_theme, sdl, &settings);
-            if (ntabs == 0) {
-                /* No tabs left: go back to BBS list */
-                /* Sync ui_vte to current window grid (may have been resized) */
-                vte_resize(ui_vte, photon_sdl_cols(sdl), photon_sdl_rows(sdl));
-                photon_sdl_set_ttf_mode(sdl, false);  /* reset to bitmap for UI */
-                show_directory = true;  /* return to dialer, not splash */
+            if (!bbs) {
+                PHOTON_DBG("user cancelled BBS list");
+                if (ntabs == 0) { state = STATE_SHUTDOWN; break; }
+                /* Return to running tabs */
+                switch_tab(sdl, &settings, active_tab);
+                state = STATE_RUNNING;
                 continue;
             }
-            /* Repaint remaining tab */
-            vte_repaint(tabs[active_tab].vte);
-            render_tab_bar(sdl);
-            photon_sdl_present(sdl);
-            goto run_session;
 
-        case PHOTON_TERM_NEWTAB:
-            /* User wants a new tab - loop back to BBS list */
-            photon_theme_apply(photon_active_theme, sdl, &settings);
-            photon_sdl_set_ttf_mode(sdl, false);  /* reset to bitmap for UI */
-            /* Sync ui_vte to current window grid (may have been resized) */
-            vte_resize(ui_vte, photon_sdl_cols(sdl), photon_sdl_rows(sdl));
-            show_directory = true;  /* open directory directly for new tab */
-            continue;
-
-        case PHOTON_TERM_SWITCH_TAB: {
-            int target = photon_switch_tab_target;
-            PHOTON_DBG("switch_tab request: target=%d (current=%d ntabs=%d)",
-                       target, active_tab, ntabs);
-            if (target >= 0 && target < ntabs && target != active_tab) {
-                switch_tab(sdl, &settings, target);
+            int slot = create_and_connect_tab(sdl, ui, &settings, bbs, ui_vte);
+            if (slot < 0) {
+                /* Connection failed, stay in directory or resume tabs */
+                if (ntabs > 0) {
+                    switch_tab(sdl, &settings, active_tab);
+                    state = STATE_RUNNING;
+                }
+                continue;
             }
-            goto run_session;
+
+            /* Connection established - enter main loop */
+            state = STATE_RUNNING;
+            continue;
         }
 
-        default:
-            break;
+        if (state == STATE_RUNNING) {
+            /* ── Unified Main Loop ─────────────────────────────────── *
+             * All tabs are pumped each iteration.  SDL events are      *
+             * processed immediately so tab switching and key events     *
+             * are never blocked by data from any connection.            */
+
+            photon_tab_bar_t tabbar = build_tab_bar();
+
+            /* 1. Pump ALL tabs (background tabs process data, no render) */
+            for (int i = 0; i < ntabs; i++) {
+                if (!tabs[i].active) continue;
+
+                /* Set s_active so VTE response callbacks route correctly */
+                photon_conn_set_active(tabs[i].conn);
+
+                if (photon_term_pump_tab(tabs[i].vte, tabs[i].conn,
+                                         sdl, i == active_tab, &tabbar)) {
+                    tabs[i].dirty = true;
+                    if (i != active_tab)
+                        tabs[i].activity = true;
+                }
+
+                /* Check if background tab disconnected */
+                if (i != active_tab &&
+                    photon_term_check_connection(tabs[i].conn) == PHOTON_TERM_DISCONNECT) {
+                    PHOTON_DBG("background tab %d disconnected", i);
+                    /* Close the dead background tab */
+                    close_tab(sdl, i);
+                    /* Rebuild tabbar after close */
+                    tabbar = build_tab_bar();
+                    /* Adjust loop index since tabs shifted */
+                    i--;
+                    continue;
+                }
+            }
+
+            /* 2. Process all pending SDL events via poll_key (non-blocking) *
+             * translate_sdl_event handles mouse selection, wheel, resize,   *
+             * window close, and keyboard - all translated to photon_key_t.  */
+            photon_key_t key;
+            while (photon_sdl_poll_key(sdl, &key)) {
+                if (key.code == 0) continue;
+                if (ntabs == 0) continue;
+
+                /* Set s_active for the active tab */
+                photon_conn_set_active(tabs[active_tab].conn);
+
+                photon_term_result_t r = photon_term_handle_key(
+                    &key,
+                    tabs[active_tab].vte, tabs[active_tab].conn,
+                    sdl, ui, tabs[active_tab].bbs, &settings, &tabbar);
+
+                switch (r) {
+                case PHOTON_TERM_CONTINUE:
+                    break;
+
+                case PHOTON_TERM_QUIT:
+                    state = STATE_SHUTDOWN;
+                    break;
+
+                case PHOTON_TERM_DISCONNECT: {
+                    int dead = active_tab;
+                    if (tabs[dead].bbs) {
+                        reselect_bbs = *tabs[dead].bbs;
+                        has_reselect = true;
+                    }
+                    close_tab(sdl, dead);
+                    photon_theme_apply(photon_active_theme, sdl, &settings);
+                    if (ntabs == 0) {
+                        vte_resize(ui_vte, photon_sdl_cols(sdl), photon_sdl_rows(sdl));
+                        photon_sdl_set_ttf_mode(sdl, false);
+                        show_directory = true;
+                        state = STATE_DIRECTORY;
+                    } else {
+                        switch_tab(sdl, &settings, active_tab);
+                    }
+                    break;
+                }
+
+                case PHOTON_TERM_NEWTAB:
+                    photon_theme_apply(photon_active_theme, sdl, &settings);
+                    photon_sdl_set_ttf_mode(sdl, false);
+                    vte_resize(ui_vte, photon_sdl_cols(sdl), photon_sdl_rows(sdl));
+                    show_directory = true;
+                    state = STATE_DIRECTORY;
+                    break;
+
+                case PHOTON_TERM_SWITCH_TAB: {
+                    int target = photon_switch_tab_target;
+                    PHOTON_DBG("switch_tab: target=%d current=%d ntabs=%d",
+                               target, active_tab, ntabs);
+                    if (target >= 0 && target < ntabs && target != active_tab)
+                        switch_tab(sdl, &settings, target);
+                    break;
+                }
+
+                case PHOTON_TERM_RESUME:
+                    break;
+                }
+
+                if (state != STATE_RUNNING) break;
+            }
+
+            if (state != STATE_RUNNING) continue;
+
+            /* 3. Render active tab */
+            if (ntabs > 0 && tabs[active_tab].active) {
+                tabbar = build_tab_bar();
+                photon_conn_set_active(tabs[active_tab].conn);
+                photon_term_render(sdl, tabs[active_tab].vte, &tabbar,
+                                   tabs[active_tab].dirty);
+                tabs[active_tab].dirty = false;
+            }
+
+            /* 4. Brief sleep to avoid busy-looping when idle */
+            struct timespec ts = {0, 1000000L};  /* 1 ms */
+            nanosleep(&ts, NULL);
         }
     }
 
