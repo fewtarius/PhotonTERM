@@ -10,6 +10,7 @@
 #include "photon_sdl.h"
 #include "photon_vte.h"
 #include "photon_settings.h"
+#include "photon_menu.h"
 
 #include <assert.h>
 #include <ctype.h>
@@ -193,63 +194,6 @@ static void ui_fill_rect(photon_ui_t *ui,
     photon_sdl_fill_rect(ui->sdl, col1, row1, col2, row2, fg, bg);
 }
 
-/* Draw a box; title may be NULL */
-static void ui_draw_box(photon_ui_t *ui,
-                        int col1, int row1, int col2, int row2,
-                        const char *title)
-{
-    const photon_ui_colors_t *cl = &ui->colors;
-    uint8_t bfg = cl->border_fg;
-    uint8_t bbg = cl->border_bg;
-
-    /* Fill interior */
-    if (row2 > row1 + 1 && col2 > col1 + 1)
-        ui_fill_rect(ui, col1+1, row1+1, col2-1, row2-1, cl->normal_fg, bbg);
-
-    /* Corners */
-    ui_put_cell(ui, col1, row1, BOX_TL, bfg, bbg, 0);
-    ui_put_cell(ui, col2, row1, BOX_TR, bfg, bbg, 0);
-    ui_put_cell(ui, col1, row2, BOX_BL, bfg, bbg, 0);
-    ui_put_cell(ui, col2, row2, BOX_BR, bfg, bbg, 0);
-
-    /* Top and bottom edges */
-    for (int c = col1+1; c < col2; c++) {
-        ui_put_cell(ui, c, row1, BOX_H, bfg, bbg, 0);
-        ui_put_cell(ui, c, row2, BOX_H, bfg, bbg, 0);
-    }
-
-    /* Side edges */
-    for (int r = row1+1; r < row2; r++) {
-        ui_put_cell(ui, col1, r, BOX_V, bfg, bbg, 0);
-        ui_put_cell(ui, col2, r, BOX_V, bfg, bbg, 0);
-    }
-
-    /* Title */
-    if (title && *title) {
-        int max_title = col2 - col1 - 3;
-        char tbuf[128];
-        snprintf(tbuf, sizeof(tbuf), " %.*s ", max_title, title);
-        int tlen = (int)strlen(tbuf);
-        int tstart = col1 + (col2 - col1 - tlen) / 2;
-        if (tstart < col1+1) tstart = col1+1;
-        ui_put_str(ui, tstart, row1, tbuf, cl->title_fg, bbg);
-    }
-}
-
-/* ── Geometry helpers ───────────────────────────────────────────────────── */
-
-/* Compute a centered box position on the terminal grid */
-static void center_box(photon_ui_t *ui, int box_w, int box_h,
-                       int *out_col1, int *out_row1)
-{
-    int tcols = ui_grid_cols(ui);
-    int trows = ui_grid_rows(ui);
-    *out_col1 = (tcols - box_w) / 2 + 1;
-    *out_row1 = (trows - box_h) / 2 + 1;
-    if (*out_col1 < 1) *out_col1 = 1;
-    if (*out_row1 < 1) *out_row1 = 1;
-}
-
 /* ── List picker ────────────────────────────────────────────────────────── */
 
 int photon_ui_list(photon_ui_t *ui,
@@ -267,41 +211,30 @@ int photon_ui_list(photon_ui_t *ui,
     }
     if (n_items == 0) return -1;
 
-    /* Width: longest item + 2 padding + 2 border */
-    int max_item_w = (int)strlen(title ? title : "");
-    for (int i = 0; i < n_items; i++) {
-        int w = (int)strlen(items[i]);
-        if (w > max_item_w) max_item_w = w;
-    }
-    if (max_item_w < 10) max_item_w = 10;
-    if (max_item_w > ui_grid_cols(ui) - 4) max_item_w = ui_grid_cols(ui) - 4;
+    const photon_theme_t *t = photon_menu_theme();
+    int W = photon_menu_cols(ui);
+    int H = photon_menu_rows(ui);
 
-    int box_w    = max_item_w + 4;           /* 2 border + 2 padding */
-    int max_vis  = ui_grid_rows(ui) - 6;    /* leave some margin */
-    if (max_vis < 3) max_vis = 3;
-    int vis_rows = n_items < max_vis ? n_items : max_vis;
-    int box_h    = vis_rows + 2;             /* +2 for borders */
-
-    int col1, row1;
-    center_box(ui, box_w, box_h, &col1, &row1);
-    int col2 = col1 + box_w - 1;
-    int row2 = row1 + box_h - 1;
+    /* Layout: title bar (row 1), items (rows 2..H-2), hints (row H-1), status (row H) */
+    int list_top = 2;
+    int hint_row = H - 1;
+    int list_bot = hint_row - 1;
+    int vis_rows = list_bot - list_top + 1;
+    if (vis_rows < 1) vis_rows = 1;
 
     /* Save screen */
     photon_ui_screen_t *saved = photon_ui_save_screen(ui);
 
-   /* Current selection */
     /* Push theme palette so dialog colors match the UI theme */
     uint8_t pal_buf[768];
     photon_theme_push_palette(ui->sdl, pal_buf);
 
     int sel    = cur ? *cur : 0;
-    int scroll = 0;  /* first visible item index */
+    int scroll = 0;
 
     if (sel < 0) sel = 0;
     if (sel >= n_items) sel = n_items - 1;
 
-    const photon_ui_colors_t *cl = &ui->colors;
     bool redraw = true;
 
     for (;;) {
@@ -310,44 +243,47 @@ int photon_ui_list(photon_ui_t *ui,
         if (sel >= scroll + vis_rows) scroll = sel - vis_rows + 1;
 
         if (redraw) {
-        /* Fill entire grid with theme bg for consistent backdrop.
-         * This also clears the SDL back-buffer, preventing flicker
-         * from hardware-accelerated double-buffering. */
-        ui_fill_rect(ui, 1, 1, ui_grid_cols(ui), ui_grid_rows(ui),
-                     cl->normal_fg, cl->normal_bg);
-
-        /* Draw box */
-        ui_draw_box(ui, col1, row1, col2, row2, title);
+        /* Full-screen layout */
+        photon_menu_fill_rect(ui, 1, 1, W, H, PHOTON_MENU_A_NORM(t));
+        photon_menu_draw_titlebar(ui, title ? title : "Select");
+        photon_menu_draw_statusbar(ui);
 
         /* Draw items */
         for (int i = 0; i < vis_rows; i++) {
-            int idx  = scroll + i;
-            int row  = row1 + 1 + i;
-            int icol = col1 + 2;
+            int idx = scroll + i;
+            int row = list_top + i;
 
-            /* Clear item row */
-            ui_fill_rect(ui, icol, row, col2-2, row,
-                         cl->normal_fg, cl->normal_bg);
+            if (idx >= n_items) {
+                photon_menu_fill_rect(ui, 1, row, W, row, PHOTON_MENU_A_NORM(t));
+                continue;
+            }
 
-            if (idx >= n_items) continue;
+            uint8_t attr = (idx == sel)
+                           ? PHOTON_MENU_A_SEL(t)
+                           : PHOTON_MENU_A_NORM(t);
 
-            uint8_t fg = (idx == sel) ? cl->hilite_fg : cl->normal_fg;
-            uint8_t bg = (idx == sel) ? cl->hilite_bg : cl->normal_bg;
-
-            /* Truncate item to box width */
-            char tmp[256];
-            int avail = max_item_w;
+            /* Truncate item to screen width */
+            char tmp[512];
+            int avail = W - 2;
+            if (avail > (int)sizeof(tmp) - 1) avail = (int)sizeof(tmp) - 1;
             snprintf(tmp, sizeof(tmp), "%-*.*s", avail, avail, items[idx]);
-            ui_put_str(ui, icol, row, tmp, fg, bg);
+            photon_menu_put_str(ui, 2, row, tmp, attr);
         }
 
         /* Scroll indicators */
         if (scroll > 0)
-            ui_put_cell(ui, col2-1, row1+1, 0x25B2 /* ▲ */,
-                        cl->border_fg, cl->border_bg, 0);
+            photon_menu_put_cell(ui, W, list_top, 0x25B2 /* ▲ */,
+                                PHOTON_MENU_A_DIM(t));
         if (scroll + vis_rows < n_items)
-            ui_put_cell(ui, col2-1, row2-1, 0x25BC /* ▼ */,
-                        cl->border_fg, cl->border_bg, 0);
+            photon_menu_put_cell(ui, W, list_bot, 0x25BC /* ▼ */,
+                                PHOTON_MENU_A_DIM(t));
+
+        /* Hints */
+        static const photon_hint_t hints[] = {
+            { "Enter", " Select  " },
+            { "Esc", " Cancel" },
+        };
+        photon_menu_draw_hints(ui, hint_row, hints, 2);
 
         photon_sdl_present(ui->sdl);
         redraw = false;
@@ -430,18 +366,17 @@ int photon_ui_input(photon_ui_t *ui,
     /* If not EDIT mode, clear buf */
     if (!(flags & PHOTON_INPUT_EDIT)) buf[0] = '\0';
 
-    int max_field = 40;
-    if (max_field > buflen - 1) max_field = buflen - 1;
-    if (max_field > ui_grid_cols(ui) - 8) max_field = ui_grid_cols(ui) - 8;
+    const photon_theme_t *t = photon_menu_theme();
+    int W = photon_menu_cols(ui);
+    int H = photon_menu_rows(ui);
 
-    int box_w = max_field + 4;
-    int box_h = 3;
-    int col1, row1;
-    center_box(ui, box_w, box_h, &col1, &row1);
-    int col2 = col1 + box_w - 1;
-    int row2 = row1 + box_h - 1;
-    int field_col = col1 + 2;
-    int field_row = row1 + 1;
+    int max_field = W - 4;
+    if (max_field > buflen - 1) max_field = buflen - 1;
+    if (max_field < 10) max_field = 10;
+
+    /* Layout: title bar (row 1), input field (row H/2), hints (row H-1), status (row H) */
+    int field_row = H / 2;
+    int field_col = 2;
 
     photon_ui_screen_t *saved = (flags & PHOTON_INPUT_NOSAVE)
                                 ? NULL
@@ -450,8 +385,6 @@ int photon_ui_input(photon_ui_t *ui,
     /* Push theme palette so dialog colors match the UI theme */
     uint8_t pal_buf[768];
     photon_theme_push_palette(ui->sdl, pal_buf);
-
-    const photon_ui_colors_t *cl = &ui->colors;
 
     int pos   = (int)strlen(buf);
     int view  = 0;  /* scroll offset within buf */
@@ -463,15 +396,15 @@ int photon_ui_input(photon_ui_t *ui,
         if (pos > view + max_field - 1) view = pos - max_field + 1;
 
         if (redraw) {
-        /* Fill entire grid with theme bg for consistent backdrop */
-        ui_fill_rect(ui, 1, 1, ui_grid_cols(ui), ui_grid_rows(ui),
-                     cl->normal_fg, cl->normal_bg);
+        /* Full-screen layout */
+        photon_menu_fill_rect(ui, 1, 1, W, H, PHOTON_MENU_A_NORM(t));
+        photon_menu_draw_titlebar(ui, title ? title : "Input");
+        photon_menu_draw_statusbar(ui);
 
-        ui_draw_box(ui, col1, row1, col2, row2, title);
-
-        /* Draw field */
-        ui_fill_rect(ui, field_col, field_row, field_col + max_field - 1, field_row,
-                     cl->input_fg, cl->input_bg);
+        /* Draw field background */
+        photon_menu_fill_rect(ui, field_col, field_row,
+                              field_col + max_field + 1, field_row,
+                              PHOTON_MENU_ATTR(CGA_BLACK, t->hclr));
 
         /* Draw text */
         int len = (int)strlen(buf);
@@ -484,17 +417,24 @@ int photon_ui_input(photon_ui_t *ui,
             } else {
                 cp = ' ';
             }
-            ui_put_cell(ui, field_col + i, field_row, cp,
-                        cl->input_fg, cl->input_bg, 0);
+            photon_menu_put_cell(ui, field_col + i, field_row, cp,
+                                 PHOTON_MENU_ATTR(CGA_BLACK, t->hclr));
         }
 
-        /* Cursor indicator: underline at cursor pos */
+        /* Cursor indicator: inverted at cursor pos */
         int cursor_screen_col = field_col + (pos - view);
         uint32_t cursor_cp = (pos < len)
             ? ((flags & PHOTON_INPUT_PASSWORD) ? '*' : (unsigned char)buf[pos])
             : ' ';
-        ui_put_cell(ui, cursor_screen_col, field_row, cursor_cp,
-                    cl->input_bg, cl->input_fg, 0);  /* inverted */
+        photon_menu_put_cell(ui, cursor_screen_col, field_row, cursor_cp,
+                             PHOTON_MENU_ATTR(t->hclr, CGA_BLACK));
+
+        /* Hints */
+        static const photon_hint_t hints[] = {
+            { "Enter", " Accept  " },
+            { "Esc", " Cancel" },
+        };
+        photon_menu_draw_hints(ui, H - 1, hints, 2);
 
         photon_sdl_present(ui->sdl);
         redraw = false;
@@ -587,11 +527,11 @@ bool photon_ui_form(photon_ui_t *ui,
     if (!ui || !fields || n_fields <= 0) return false;
     PHOTON_DBG("photon_ui_form: ENTER title='%s' n_fields=%d", title ? title : "(null)", n_fields);
 
-    const photon_ui_colors_t *cl = &ui->colors;
-    int vte_cols_n = ui_grid_cols(ui);
-    int vte_rows_n = ui_grid_rows(ui);
+    const photon_theme_t *t = photon_menu_theme();
+    int W = photon_menu_cols(ui);
+    int H = photon_menu_rows(ui);
 
-    /* Layout */
+    /* Layout: title bar (row 1), fields (rows 2..H-2), hints (row H-1), status (row H) */
     int label_w = 0;
     for (int i = 0; i < n_fields; i++) {
         int lw = fields[i].label ? (int)strlen(fields[i].label) : 0;
@@ -599,28 +539,13 @@ bool photon_ui_form(photon_ui_t *ui,
     }
     if (label_w < 8) label_w = 8;
 
-    /* Box: label_w + ": " + value_area + borders */
-    int value_w = 28;                           /* value display width */
-    int box_w   = 2 + label_w + 2 + value_w + 2;  /* borders + padding */
-    if (box_w > vte_cols_n - 2) {
-        value_w -= (box_w - (vte_cols_n - 2));
-        if (value_w < 8) value_w = 8;
-        box_w = 2 + label_w + 2 + value_w + 2;
-    }
+    int value_w = W - label_w - 6;  /* label + ": " + value + margins */
+    if (value_w < 8) value_w = 8;
+    if (value_w > 60) value_w = 60;
 
-    /* Height: title + blank + n_fields + blank + [Enter/Esc hint] + border */
-    int box_h = 2 + n_fields + 2;  /* top border, n rows, hint, bottom border */
-    if (box_h > vte_rows_n - 2) box_h = vte_rows_n - 2;
-
-    int col1, row1;
-    center_box(ui, box_w, box_h, &col1, &row1);
-    int col2 = col1 + box_w - 1;
-    int row2 = row1 + box_h - 1;
-
-    /* Field rows start at row1+1, label at col1+2, value at col1+2+label_w+2 */
-    int val_col  = col1 + 2 + label_w + 2;
-    int field_r1 = row1 + 1;
-    int hint_row = row2 - 1;
+    int val_col = 2 + label_w + 2;
+    int field_r1 = 2;
+    int hint_row = H - 1;
 
     /* Per-field edit state: cursor position and view offset */
     int *pos  = calloc((size_t)n_fields, sizeof(int));
@@ -643,33 +568,28 @@ bool photon_ui_form(photon_ui_t *ui,
 
     for (;;) {
         if (redraw) {
-        /* Fill entire grid with theme bg for consistent backdrop */
-        ui_fill_rect(ui, 1, 1, ui_grid_cols(ui), ui_grid_rows(ui),
-                     cl->normal_fg, cl->normal_bg);
-        /* Draw box chrome */
-        ui_draw_box(ui, col1, row1, col2, row2, title);
-
-        /* Draw hint */
-        const char *hint = "Tab/Enter:\xe2\x86\x93next  Enter on last:save  Esc:cancel";
-        ui_put_str(ui, col1 + 1, hint_row, hint, cl->normal_fg, cl->normal_bg);
+        /* Full-screen layout */
+        photon_menu_fill_rect(ui, 1, 1, W, H, PHOTON_MENU_A_NORM(t));
+        photon_menu_draw_titlebar(ui, title ? title : "Form");
+        photon_menu_draw_statusbar(ui);
 
         /* Draw all fields */
         for (int i = 0; i < n_fields; i++) {
             bool act = (i == active);
-            int  fg  = act ? cl->hilite_fg : cl->normal_fg;
-            int  bg  = act ? cl->hilite_bg : cl->normal_bg;
-            int  row = field_r1 + i;
+            int row = field_r1 + i;
+            if (row >= hint_row) break;  /* no room */
+
+            uint8_t norm_attr = PHOTON_MENU_A_NORM(t);
+            uint8_t sel_attr  = PHOTON_MENU_A_SEL(t);
 
             /* Label */
-            char lbuf[32];
+            char lbuf[64];
             snprintf(lbuf, sizeof(lbuf), "%-*s:", label_w, fields[i].label ? fields[i].label : "");
-            ui_put_str(ui, col1 + 2, row, lbuf, cl->normal_fg, cl->normal_bg);
+            photon_menu_put_str(ui, 2, row, lbuf, norm_attr);
 
             /* Value area background */
-            char blanks[64];
-            memset(blanks, ' ', (size_t)value_w);
-            blanks[value_w] = '\0';
-            ui_put_str(ui, val_col, row, blanks, fg, bg);
+            photon_menu_fill_rect(ui, val_col, row, val_col + value_w - 1, row,
+                                  act ? sel_attr : norm_attr);
 
             /* Value text */
             const char *buf = fields[i].buf ? fields[i].buf : "";
@@ -687,41 +607,49 @@ bool photon_ui_form(photon_ui_t *ui,
                     }
                 }
                 const char *cv = (fields[i].n_choices > 0) ? fields[i].choices[idx] : buf;
-                char row_str[64];
-                snprintf(row_str, sizeof(row_str), "%-*s", value_w, cv);
-                ui_put_str(ui, val_col, row, row_str, fg, bg);
+                photon_menu_put_padded(ui, val_col, row, cv, value_w,
+                                       act ? sel_attr : norm_attr);
             } else {
                 /* Text/number/password: scrolled view */
                 int v = act ? view[i] : 0;
-                /* For inactive fields use simple left-aligned view */
                 if (!act && vlen > value_w) v = 0;
                 for (int c = 0; c < value_w; c++) {
                     int ci = v + c;
                     char ch = (ci < vlen) ? buf[ci] : ' ';
                     if (is_pw && ci < vlen) ch = '*';
-                    ui_put_cell(ui, val_col + c, row, (unsigned char)ch, fg, bg, 0);
+                    photon_menu_put_cell(ui, val_col + c, row, (unsigned char)ch,
+                                         act ? sel_attr : norm_attr);
                 }
             }
         }
 
         /* Draw cursor in active text field */
         {
-            int i   = active;
+            int i = active;
             int row = field_r1 + i;
-            if (fields[i].type != PHOTON_FIELD_CHOICE) {
-                int v    = view[i];
-                int p    = pos[i];
-                int cx   = val_col + (p - v);
+            if (row < hint_row && fields[i].type != PHOTON_FIELD_CHOICE) {
+                int v = view[i];
+                int p = pos[i];
+                int cx = val_col + (p - v);
                 if (cx >= val_col && cx < val_col + value_w) {
                     const char *buf = fields[i].buf ? fields[i].buf : "";
                     int vlen = (int)strlen(buf);
                     char ch = (p < vlen) ? buf[p] : ' ';
                     if (fields[i].type == PHOTON_FIELD_PASSWORD && p < vlen) ch = '*';
-                    ui_put_cell(ui, cx, row, (unsigned char)ch,
-                                cl->input_bg, cl->input_fg, 0);
+                    /* Inverted cursor */
+                    photon_menu_put_cell(ui, cx, row, (unsigned char)ch,
+                                         PHOTON_MENU_ATTR(t->lbbclr, t->lbclr));
                 }
             }
         }
+
+        /* Hints */
+        static const photon_hint_t hints[] = {
+            { "Tab", " Next  " },
+            { "Enter", " Save  " },
+            { "Esc", " Cancel" },
+        };
+        photon_menu_draw_hints(ui, hint_row, hints, 3);
 
         photon_sdl_present(ui->sdl);
         redraw = false;
@@ -848,11 +776,9 @@ bool photon_ui_form(photon_ui_t *ui,
 
         /* Scroll view */
         if (f->buf) {
-            int ln = (int)strlen(f->buf);
             if (*p < *v) *v = *p;
             if (*p > *v + value_w - 1) *v = *p - value_w + 1;
             if (*v < 0) *v = 0;
-            (void)ln;
         }
         redraw = true;
     }
@@ -871,35 +797,37 @@ void photon_ui_msg(photon_ui_t *ui, const char *message)
 {
     if (!ui || !message) return;
 
-    int msg_len = (int)strlen(message);
-    int box_w   = msg_len + 4;
-    if (box_w < 20) box_w = 20;
-    if (box_w > ui_grid_cols(ui) - 2) box_w = ui_grid_cols(ui) - 2;
-
-    int box_h   = 3;
-    int col1, row1;
-    center_box(ui, box_w, box_h, &col1, &row1);
-    int col2 = col1 + box_w - 1;
-    int row2 = row1 + box_h - 1;
+    const photon_theme_t *t = photon_menu_theme();
+    int W = photon_menu_cols(ui);
+    int H = photon_menu_rows(ui);
 
     photon_ui_screen_t *saved = photon_ui_save_screen(ui);
-    const photon_ui_colors_t *cl = &ui->colors;
 
     /* Push theme palette so dialog colors match the UI theme */
     uint8_t pal_buf[768];
     photon_theme_push_palette(ui->sdl, pal_buf);
 
-    /* Fill entire grid with theme bg for consistent backdrop */
-    ui_fill_rect(ui, 1, 1, ui_grid_cols(ui), ui_grid_rows(ui),
-                 cl->normal_fg, cl->normal_bg);
+    /* Full-screen layout: title bar, centered message, hint bar, status bar */
+    photon_menu_fill_rect(ui, 1, 1, W, H, PHOTON_MENU_A_NORM(t));
+    photon_menu_draw_titlebar(ui, "PhotonTERM");
+    photon_menu_draw_statusbar(ui);
 
-    ui_draw_box(ui, col1, row1, col2, row2, NULL);
-
-    /* Center message text */
-    int avail  = col2 - col1 - 2;
-    char tmp[256];
+    /* Center message text in the middle of the screen */
+    int msg_len = (int)strlen(message);
+    int avail = W - 4;
+    if (avail < 10) avail = 10;
+    int col = (W - (msg_len < avail ? msg_len : avail)) / 2;
+    if (col < 2) col = 2;
+    int row = H / 2;
+    char tmp[512];
     snprintf(tmp, sizeof(tmp), "%-*.*s", avail, avail, message);
-    ui_put_str(ui, col1 + 2, row1 + 1, tmp, cl->normal_fg, cl->normal_bg);
+    photon_menu_put_str(ui, col, row, tmp, PHOTON_MENU_A_NORM(t));
+
+    /* Hint bar */
+    static const photon_hint_t hints[] = {
+        { "Any key", " continue" },
+    };
+    photon_menu_draw_hints(ui, H - 1, hints, 1);
 
     photon_sdl_present(ui->sdl);
 
@@ -956,25 +884,23 @@ void photon_ui_showbuf(photon_ui_t *ui,
                        int max_rows)
 {
     if (!ui || !text) return;
-    if (max_cols <= 0) max_cols = 78;
-    if (max_rows <= 0) max_rows = 20;
-    if (max_cols > ui_grid_cols(ui) - 2) max_cols = ui_grid_cols(ui) - 2;
-    if (max_rows > ui_grid_rows(ui) - 2) max_rows = ui_grid_rows(ui) - 2;
+
+    const photon_theme_t *t = photon_menu_theme();
+    int W = photon_menu_cols(ui);
+    int H = photon_menu_rows(ui);
 
     char **lines = NULL;
     int   n_lines = split_lines(text, &lines);
 
-    int vis_rows = n_lines < max_rows - 2 ? n_lines : max_rows - 2;
-    int box_h    = vis_rows + 2;
-    int box_w    = max_cols;
-    int col1, row1;
-    center_box(ui, box_w, box_h, &col1, &row1);
-    int col2     = col1 + box_w - 1;
-    int row2     = row1 + box_h - 1;
-    int inner_w  = col2 - col1 - 2;
+    /* Layout: title bar (row 1), text (rows 2..H-2), hints (row H-1), status (row H) */
+    int text_top = 2;
+    int hint_row = H - 1;
+    int text_bot = hint_row - 1;
+    int vis_rows = text_bot - text_top + 1;
+    if (vis_rows < 1) vis_rows = 1;
+    int inner_w = W - 2;
 
     photon_ui_screen_t *saved = photon_ui_save_screen(ui);
-    const photon_ui_colors_t *cl = &ui->colors;
 
     /* Push theme palette so dialog colors match the UI theme */
     uint8_t pal_buf[768];
@@ -985,41 +911,37 @@ void photon_ui_showbuf(photon_ui_t *ui,
 
     for (;;) {
         if (redraw) {
-        /* Fill entire grid with theme bg for consistent backdrop */
-        ui_fill_rect(ui, 1, 1, ui_grid_cols(ui), ui_grid_rows(ui),
-                     cl->normal_fg, cl->normal_bg);
-        ui_draw_box(ui, col1, row1, col2, row2, title);
+        /* Full-screen layout */
+        photon_menu_fill_rect(ui, 1, 1, W, H, PHOTON_MENU_A_NORM(t));
+        photon_menu_draw_titlebar(ui, title ? title : "Text");
+        photon_menu_draw_statusbar(ui);
 
         for (int i = 0; i < vis_rows; i++) {
-            int idx  = scroll + i;
-            int row  = row1 + 1 + i;
-            /* Clear line */
-            ui_fill_rect(ui, col1+1, row, col2-1, row, cl->normal_fg, cl->normal_bg);
+            int idx = scroll + i;
+            int row = text_top + i;
             if (idx < n_lines && lines[idx]) {
-                char tmp[256];
+                char tmp[512];
                 snprintf(tmp, sizeof(tmp), "%-*.*s", inner_w, inner_w, lines[idx]);
-                ui_put_str(ui, col1 + 2, row, tmp, cl->normal_fg, cl->normal_bg);
+                photon_menu_put_str(ui, 2, row, tmp, PHOTON_MENU_A_NORM(t));
+            } else {
+                photon_menu_fill_rect(ui, 1, row, W, row, PHOTON_MENU_A_NORM(t));
             }
         }
 
         /* Scroll indicators */
         if (scroll > 0)
-            ui_put_cell(ui, col2-1, row1+1, 0x25B2,
-                        cl->border_fg, cl->border_bg, 0);
+            photon_menu_put_cell(ui, W, text_top, 0x25B2,
+                                 PHOTON_MENU_A_DIM(t));
         if (scroll + vis_rows < n_lines)
-            ui_put_cell(ui, col2-1, row2-1, 0x25BC,
-                        cl->border_fg, cl->border_bg, 0);
+            photon_menu_put_cell(ui, W, text_bot, 0x25BC,
+                                 PHOTON_MENU_A_DIM(t));
 
-        /* Status line at bottom of box */
-        {
-            char status[64];
-            snprintf(status, sizeof(status), " [%d/%d] PgUp/PgDn ESC=close ",
-                     scroll + 1, n_lines);
-            int slen = (int)strlen(status);
-            int scol = col1 + (box_w - slen) / 2;
-            if (scol < col1+1) scol = col1+1;
-            ui_put_str(ui, scol, row2, status, cl->border_fg, cl->border_bg);
-        }
+        /* Hints */
+        static const photon_hint_t hints[] = {
+            { "PgUp/PgDn", " Scroll  " },
+            { "Esc", " Close" },
+        };
+        photon_menu_draw_hints(ui, hint_row, hints, 2);
 
         photon_sdl_present(ui->sdl);
         redraw = false;

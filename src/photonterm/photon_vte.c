@@ -1326,9 +1326,11 @@ void vte_resize(vte_t *v, int cols, int rows)
     v->cols   = cols;
     v->rows   = rows;
 
-    /* Clamp margins */
-    if (v->margin_top > rows) v->margin_top = 1;
-    if (v->margin_bot > rows) v->margin_bot = rows;
+    /* Reset scroll region to full new height on resize.
+     * Real terminals reset DECSTBM margins on resize; keeping the old
+     * region causes output to scroll in a tiny sub-area of the screen. */
+    v->margin_top = 1;
+    v->margin_bot = rows;
 
     clamp_cursor(v);
     vte_repaint(v);

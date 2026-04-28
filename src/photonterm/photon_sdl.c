@@ -859,6 +859,7 @@ void photon_sdl_restore_palette(photon_sdl_t *ctx, const uint8_t buf[768])
         ctx->pal[i].g = buf[i * 3 + 1];
         ctx->pal[i].b = buf[i * 3 + 2];
     }
+    ctx->pal_dirty = true;
 }
 
 void photon_sdl_load_xterm_palette(photon_sdl_t *ctx)
@@ -1768,7 +1769,9 @@ static void translate_sdl_event(photon_sdl_t *ctx, const SDL_Event *ev)
         || sym == SDLK_F11) {
         Uint32 flags = SDL_GetWindowFlags(ctx->win);
         if (flags & (SDL_WINDOW_FULLSCREEN | SDL_WINDOW_FULLSCREEN_DESKTOP)) {
-            /* Exiting fullscreen: restore saved windowed size. */
+            /* Exiting fullscreen: restore saved windowed size.
+             * The WINDOWEVENT from SDL_SetWindowFullscreen(0) will
+             * recompute the grid from the restored window size. */
             SDL_SetWindowFullscreen(ctx->win, 0);
             if (ctx->pre_fullscreen_win_w > 0 && ctx->pre_fullscreen_win_h > 0) {
                 SDL_SetWindowSize(ctx->win,
@@ -1780,33 +1783,33 @@ static void translate_sdl_event(photon_sdl_t *ctx, const SDL_Event *ev)
             SDL_GetWindowSize(ctx->win, &ctx->pre_fullscreen_win_w,
                              &ctx->pre_fullscreen_win_h);
             SDL_SetWindowFullscreen(ctx->win, SDL_WINDOW_FULLSCREEN_DESKTOP);
-        }
-        /* Force a grid recalculation from the current window size.
-         * On compositors like Gamescope the window is already fullscreen so
-         * SDL_SetWindowFullscreen is a no-op and no WINDOWEVENT fires - we
-         * must compute the grid ourselves.  On normal compositors the
-         * WINDOWEVENT will also fire and do this, which is harmless since
-         * the values will be the same. */
-        {
-            int draw_w, draw_h;
-            SDL_GetRendererOutputSize(ctx->ren, &draw_w, &draw_h);
-            int log_w = draw_w, log_h = draw_h;
-            SDL_GetWindowSize(ctx->win, &log_w, &log_h);
-            if (log_w < draw_w) log_w = draw_w;
-            if (log_h < draw_h) log_h = draw_h;
-            ctx->win_w = log_w;
-            ctx->win_h = log_h;
-            ctx->draw_w = draw_w;
-            ctx->draw_h = draw_h;
-            ctx->retina_scale = (log_w > 0) ? (float)draw_w / (float)log_w : 1.0f;
-            if (ctx->cell_w > 0 && ctx->cell_h > 0) {
-                int nc = log_w / ctx->cell_w;
-                int nr = log_h / ctx->cell_h;
-                if (nc < 1) nc = 1;
-                if (nr < 1) nr = 1;
-                ctx->pending_cols = nc;
-                ctx->pending_rows = nr;
-                ctx->resize_pending = true;
+            /* Force a grid recalculation from the current window size.
+             * On compositors like Gamescope the window is already fullscreen so
+             * SDL_SetWindowFullscreen is a no-op and no WINDOWEVENT fires - we
+             * must compute the grid ourselves.  On normal compositors the
+             * WINDOWEVENT will also fire and do this, which is harmless since
+             * the values will be the same. */
+            {
+                int draw_w, draw_h;
+                SDL_GetRendererOutputSize(ctx->ren, &draw_w, &draw_h);
+                int log_w = draw_w, log_h = draw_h;
+                SDL_GetWindowSize(ctx->win, &log_w, &log_h);
+                if (log_w < draw_w) log_w = draw_w;
+                if (log_h < draw_h) log_h = draw_h;
+                ctx->win_w = log_w;
+                ctx->win_h = log_h;
+                ctx->draw_w = draw_w;
+                ctx->draw_h = draw_h;
+                ctx->retina_scale = (log_w > 0) ? (float)draw_w / (float)log_w : 1.0f;
+                if (ctx->cell_w > 0 && ctx->cell_h > 0) {
+                    int nc = log_w / ctx->cell_w;
+                    int nr = log_h / ctx->cell_h;
+                    if (nc < 1) nc = 1;
+                    if (nr < 1) nr = 1;
+                    ctx->pending_cols = nc;
+                    ctx->pending_rows = nr;
+                    ctx->resize_pending = true;
+                }
             }
         }
         return;

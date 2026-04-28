@@ -301,10 +301,12 @@ static int create_and_connect_tab(photon_sdl_t *sdl, photon_ui_t *ui,
     /* Tab count changed - resize VTEs for tab bar row */
     resize_tabs_for_bar(sdl);
 
-    /* Auto-detect window size */
+    /* Auto-detect window size (account for tab bar row) */
     if (settings->cols == 0 && settings->rows == 0) {
+        int term_rows = (ntabs > 1) ? photon_sdl_rows(sdl) - 1 : photon_sdl_rows(sdl);
+        if (term_rows < 1) term_rows = 1;
         bbs->init_cols = photon_sdl_cols(sdl);
-        bbs->init_rows = photon_sdl_rows(sdl);
+        bbs->init_rows = term_rows;
     }
 
     PHOTON_DBG("tab %d: connecting to '%s' %s:%u type=%d",
@@ -481,67 +483,21 @@ int main(int argc, char **argv)
 
         if (state == STATE_RUNNING) {
             /* ── Unified Main Loop ─────────────────────────────────── *
-             * All tabs are pumped each iteration.  SDL events are      *
-             * processed immediately so tab switching and key events     *
-             * are never blocked by data from any connection.            */
+             * Priority: SDL events > active tab data > background tabs. *
+             * SDL events are processed first so key input (tab switch,  *
+             * quit) is never blocked by data processing. Background     *
+             * tabs get one batch per iteration to limit CPU usage.       */
 
             photon_tab_bar_t tabbar = build_tab_bar();
 
-            /* 1. Pump ALL tabs (background tabs process data, no render) */
-            for (int i = 0; i < ntabs; i++) {
-                if (!tabs[i].active) continue;
-
-                /* Set s_active so VTE response callbacks route correctly */
-                photon_conn_set_active(tabs[i].conn);
-
-                if (photon_term_pump_tab(tabs[i].vte, tabs[i].conn,
-                                         sdl, i == active_tab, &tabbar)) {
-                    tabs[i].dirty = true;
-                    if (i != active_tab)
-                        tabs[i].activity = true;
-                }
-
-                /* Check if background tab disconnected */
-                if (photon_term_check_connection(tabs[i].conn) == PHOTON_TERM_DISCONNECT) {
-                    if (i == active_tab) {
-                        /* Active tab disconnected - close it and go to directory
-                         * or switch to another tab. */
-                        PHOTON_DBG("active tab %d disconnected", i);
-                        if (tabs[i].bbs) {
-                            reselect_bbs = *tabs[i].bbs;
-                            has_reselect = true;
-                        }
-                        close_tab(sdl, i);
-                        photon_theme_apply(photon_active_theme, sdl, &settings);
-                        if (ntabs == 0) {
-                            vte_resize(ui_vte, photon_sdl_cols(sdl),
-                                       photon_sdl_rows(sdl));
-                            photon_sdl_set_ttf_mode(sdl, false);
-                            show_directory = true;
-                            state = STATE_DIRECTORY;
-                        } else {
-                            switch_tab(sdl, &settings, active_tab);
-                        }
-                        break;
-                    } else {
-                        PHOTON_DBG("background tab %d disconnected", i);
-                        close_tab(sdl, i);
-                        tabbar = build_tab_bar();
-                        i--;
-                        continue;
-                    }
-                }
-            }
-
-            /* 2. Process all pending SDL events via poll_key (non-blocking) *
-             * translate_sdl_event handles mouse selection, wheel, resize,   *
-             * window close, and keyboard - all translated to photon_key_t.  */
+            /* 1. Process ALL pending SDL events first (keys, resize, etc.)
+             * This ensures tab switching and other input is never delayed
+             * by data processing, even under heavy system load. */
             photon_key_t key;
             while (photon_sdl_poll_key(sdl, &key)) {
                 if (key.code == 0) continue;
                 if (ntabs == 0) continue;
 
-                /* Set s_active for the active tab */
                 photon_conn_set_active(tabs[active_tab].conn);
 
                 photon_term_result_t r = photon_term_handle_key(
@@ -598,6 +554,53 @@ int main(int argc, char **argv)
                 }
 
                 if (state != STATE_RUNNING) break;
+            }
+
+            if (state != STATE_RUNNING) continue;
+
+            /* 2. Pump tab data: active tab first, then background tabs.
+             * Active tab drains all available data (user is watching it).
+             * Background tabs get one batch per iteration to limit CPU. */
+            for (int i = 0; i < ntabs; i++) {
+                if (!tabs[i].active) continue;
+
+                photon_conn_set_active(tabs[i].conn);
+
+                if (photon_term_pump_tab(tabs[i].vte, tabs[i].conn,
+                                         sdl, i == active_tab, &tabbar)) {
+                    tabs[i].dirty = true;
+                    if (i != active_tab)
+                        tabs[i].activity = true;
+                }
+
+                /* Check if tab disconnected */
+                if (photon_term_check_connection(tabs[i].conn) == PHOTON_TERM_DISCONNECT) {
+                    if (i == active_tab) {
+                        PHOTON_DBG("active tab %d disconnected", i);
+                        if (tabs[i].bbs) {
+                            reselect_bbs = *tabs[i].bbs;
+                            has_reselect = true;
+                        }
+                        close_tab(sdl, i);
+                        photon_theme_apply(photon_active_theme, sdl, &settings);
+                        if (ntabs == 0) {
+                            vte_resize(ui_vte, photon_sdl_cols(sdl),
+                                       photon_sdl_rows(sdl));
+                            photon_sdl_set_ttf_mode(sdl, false);
+                            show_directory = true;
+                            state = STATE_DIRECTORY;
+                        } else {
+                            switch_tab(sdl, &settings, active_tab);
+                        }
+                        break;
+                    } else {
+                        PHOTON_DBG("background tab %d disconnected", i);
+                        close_tab(sdl, i);
+                        tabbar = build_tab_bar();
+                        i--;
+                        continue;
+                    }
+                }
             }
 
             if (state != STATE_RUNNING) continue;

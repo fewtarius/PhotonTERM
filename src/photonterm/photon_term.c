@@ -337,9 +337,6 @@ static session_menu_result_t show_session_menu(photon_ui_t *ui,
         if (key.code == 0) continue;
 
         if (key.code == '\x1b' || key.code == PHOTON_KEY_QUIT) {
-            photon_sdl_invalidate(sdl);
-            photon_sdl_repaint(sdl, vte);
-            photon_sdl_present(sdl);
             return SESSION_MENU_NONE;
         }
 
@@ -349,9 +346,6 @@ static session_menu_result_t show_session_menu(photon_ui_t *ui,
         }
 
         if (key.code == '\r' || key.code == ' ') {
-            photon_sdl_invalidate(sdl);
-            photon_sdl_repaint(sdl, vte);
-            photon_sdl_present(sdl);
             return (session_menu_result_t)state.cursor;
         }
     }
@@ -639,14 +633,30 @@ bool photon_term_pump_tab(vte_t *vte, photon_conn_t *conn,
     (void)sdl;
     (void)tabbar;
 
-    /* Drain available data from this tab's connection into its VTE.
-     * Non-blocking: returns immediately when no data is available. */
+    /* Drain data from this tab's connection into its VTE.
+     * Active tab: drain all available data (user is watching it),
+     * but cap iterations to avoid stalling the render loop.
+     * Background tabs: drain one batch per iteration to limit CPU usage
+     * and prevent busy background tabs from starving the active tab. */
     uint8_t buf[65536];
     bool got_data = false;
-    int got;
-    while ((got = photon_conn_recv_for(conn, buf, sizeof(buf))) > 0) {
-        vte_input(vte, buf, (size_t)got);
-        got_data = true;
+
+    if (is_active) {
+        /* Active tab: drain everything, but cap iterations */
+        int got;
+        int iters = 0;
+        while ((got = photon_conn_recv_for(conn, buf, sizeof(buf))) > 0) {
+            vte_input(vte, buf, (size_t)got);
+            got_data = true;
+            if (++iters >= 4) break;
+        }
+    } else {
+        /* Background tab: one batch per iteration */
+        int got = photon_conn_recv_for(conn, buf, sizeof(buf));
+        if (got > 0) {
+            vte_input(vte, buf, (size_t)got);
+            got_data = true;
+        }
     }
     return got_data;
 }
@@ -701,6 +711,7 @@ photon_term_result_t photon_term_handle_key(const photon_key_t *k,
                 ui, sdl, vte, bbs, settings, s_session_menu_userdata);
             photon_sdl_restore_palette(sdl, saved_pal);
             photon_sdl_set_ttf_mode(sdl, was_ttf);
+            photon_sdl_invalidate(sdl);
             if (mr == PHOTON_TERM_RESUME)
                 return PHOTON_TERM_CONTINUE;
             return mr;
@@ -710,6 +721,7 @@ photon_term_result_t photon_term_handle_key(const photon_key_t *k,
 
         photon_sdl_restore_palette(sdl, saved_pal);
         photon_sdl_set_ttf_mode(sdl, was_ttf);
+        photon_sdl_invalidate(sdl);
         switch (m) {
             case SESSION_MENU_DISCONNECT:
                 return PHOTON_TERM_DISCONNECT;
