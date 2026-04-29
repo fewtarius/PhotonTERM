@@ -166,6 +166,16 @@ struct vte {
      * Most BBS systems expect this behaviour. */
     bool lnm;
 
+    /* IRM - Insert Mode (ESC[4h/4l).
+     * When true, new characters push existing text right.
+     * When false (default), new characters overwrite. */
+    bool insert_mode;
+
+    /* DECCKM - Application Cursor Keys (ESC[?1h/1l).
+     * When true, arrow keys send ESC O A/B/C/D instead of ESC [ A/B/C/D.
+     * Stored but not yet used for key generation. */
+    bool app_cursor;
+
     /* Callbacks */
     vte_callbacks_t cb;
 
@@ -178,6 +188,9 @@ struct vte {
      * SI (0x0F) shifts back to G0. */
     bool g0_linedraw;  /* true: G0 is DEC line-drawing; false: ASCII */
     bool using_g1;     /* true: currently shifted to G1 */
+
+    /* Last printed character (for REP - ESC[Pnb) */
+    vte_cell_t last_printed;
 
     /* OSC accumulation buffer */
     char osc_buf[256];
@@ -406,6 +419,7 @@ static void print_char(vte_t *v, uint32_t cp)
     cell.bg_rgb = v->bg_rgb;
     *cell_at(v, v->cx, v->cy) = cell;
     emit_cell(v, v->cx, v->cy, &cell);
+    v->last_printed = cell;
 
     if (v->cx >= v->cols) {
         if (v->autowrap)
@@ -665,6 +679,20 @@ static void dispatch_csi(vte_t *v, uint8_t final)
         emit_clear(v, v->cx, v->cy, v->cx + n - 1, v->cy);
         break;
     }
+    case 'b': /* REP - repeat preceding character */
+    {
+        int n = PARAM(0, 1);
+        if (v->last_printed.codepoint != 0) {
+            for (int i = 0; i < n; i++)
+                print_char(v, v->last_printed.codepoint);
+        }
+        break;
+    }
+    case 'd': /* VPA - vertical position absolute */
+        move_cursor(v, v->cx, PARAM(0, 1));
+        break;
+    case 't': /* XTWINOPS - window operations (silently ignore) */
+        break;
 
     /* ── Scroll ── */
     case 'S': /* SU - scroll up */
@@ -701,8 +729,10 @@ static void dispatch_csi(vte_t *v, uint8_t final)
     /* ── Modes ── */
     case 'h': /* SM / DECSET */
         if (!priv) {
-            /* Standard modes: 4=IRM (insert mode) - ignore for now */
+            /* Standard modes */
             for (int i = 0; i < v->nparams; i++) {
+                if (v->params[i] == 4)
+                    v->insert_mode = true;
                 if (v->params[i] == 7)
                     v->autowrap = true;
                 if (v->params[i] == 20)
@@ -712,14 +742,18 @@ static void dispatch_csi(vte_t *v, uint8_t final)
             /* DEC private modes */
             for (int i = 0; i < v->nparams; i++) {
                 int p = v->params[i];
-                if (p == 7)  v->autowrap = true;
-                if (p == 25) v->cursor_visible = true;
+                if (p == 1)  v->app_cursor = true;   /* DECCKM */
+                if (p == 7)  v->autowrap = true;      /* DECAWM */
+                if (p == 25) v->cursor_visible = true; /* DECTCEM */
+                /* 12 = cursor blink, 1049 = alt screen, 1006 = SGR mouse - silently accepted */
             }
         }
         break;
     case 'l': /* RM / DECRST */
         if (!priv) {
             for (int i = 0; i < v->nparams; i++) {
+                if (v->params[i] == 4)
+                    v->insert_mode = false;
                 if (v->params[i] == 7)
                     v->autowrap = false;
                 if (v->params[i] == 20)
@@ -728,8 +762,10 @@ static void dispatch_csi(vte_t *v, uint8_t final)
         } else {
             for (int i = 0; i < v->nparams; i++) {
                 int p = v->params[i];
-                if (p == 7)  v->autowrap = false;
-                if (p == 25) v->cursor_visible = false;
+                if (p == 1)  v->app_cursor = false;    /* DECCKM */
+                if (p == 7)  v->autowrap = false;       /* DECAWM */
+                if (p == 25) v->cursor_visible = false;  /* DECTCEM */
+                /* 12, 1049, 1006 - silently accepted */
             }
         }
         break;
@@ -1295,6 +1331,7 @@ void vte_reset(vte_t *v, bool hard)
         v->autowrap = true;
         v->cursor_visible = true;
         v->saved_cx = v->saved_cy = 0;
+        v->last_printed.codepoint = 0;
     }
     clear_cells_quiet(v, 1, 1, v->cols, v->rows);
     emit_clear(v, 1, 1, v->cols, v->rows);
