@@ -100,5 +100,10 @@ photon_term_result_t photon_term_check_connection(photon_conn_t *conn);
 void photon_term_render(photon_sdl_t *sdl, vte_t *vte,
                         const photon_tab_bar_t *tabbar, bool dirty);
 
+/* Force the next photon_term_render() call to render immediately,
+ * bypassing the 60fps frame timer.  Call after tab switches, resizes,
+ * and other UI events that need immediate visual feedback. */
+void photon_term_render_force_next(void);
+
 /* Tab switch target (0-based index) when result is PHOTON_TERM_SWITCH_TAB */
 extern int photon_switch_tab_target;

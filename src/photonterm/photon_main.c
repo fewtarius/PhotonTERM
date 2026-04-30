@@ -200,6 +200,7 @@ static void switch_tab(photon_sdl_t *sdl, photon_settings_t *settings, int idx)
     vte_repaint(tabs[active_tab].vte);
     render_tab_bar(sdl);
     photon_sdl_present(sdl);
+    photon_term_render_force_next();
 }
 
 /* Resize all tab VTEs to account for tab bar row.
@@ -490,9 +491,15 @@ int main(int argc, char **argv)
 
             photon_tab_bar_t tabbar = build_tab_bar();
 
-            /* 1. Process ALL pending SDL events first (keys, resize, etc.)
-             * This ensures tab switching and other input is never delayed
-             * by data processing, even under heavy system load. */
+            /* ── Decoupled main loop ────────────────────────────────── *
+             * Events and data pumping run every iteration (1ms tick).  *
+             * Rendering is gated by the 60fps frame timer so the GPU   *
+             * is never double-booked.  This keeps tab switching and    *
+             * key input responsive even when the GPU is busy with      *
+             * local LLM inference or other heavy work.                 */
+
+            /* 1. Process ALL pending SDL events (keys, resize, etc.)
+             * This runs every iteration - never gated by render timing. */
             photon_key_t key;
             while (photon_sdl_poll_key(sdl, &key)) {
                 if (key.code == 0) continue;
@@ -605,7 +612,15 @@ int main(int argc, char **argv)
 
             if (state != STATE_RUNNING) continue;
 
-            /* 3. Render active tab */
+            /* 3. Render active tab (gated by frame timer).
+             * photon_term_render() checks its own 16ms frame timer and
+             * skips the render if it's too soon.  This means the main
+             * loop spins at ~1ms ticks for events/data but only renders
+             * at ~60fps, avoiding GPU contention with LLM inference.
+             * Window expose events force an immediate render. */
+            if (photon_sdl_take_expose(sdl))
+                photon_term_render_force_next();
+
             if (ntabs > 0 && tabs[active_tab].active) {
                 /* Check for window resize (fullscreen toggle, user drag) */
                 int nc = 0, nr = 0;
@@ -620,6 +635,8 @@ int main(int argc, char **argv)
                     /* Notify the active connection of the new size */
                     photon_conn_set_active(tabs[active_tab].conn);
                     photon_conn_resize(nc, term_rows);
+                    /* Force immediate render after resize */
+                    photon_term_render_force_next();
                 }
 
                 tabbar = build_tab_bar();
@@ -629,7 +646,10 @@ int main(int argc, char **argv)
                 tabs[active_tab].dirty = false;
             }
 
-            /* 4. Brief sleep to avoid busy-looping when idle */
+            /* 4. Brief sleep to avoid busy-looping when idle.
+             * 1ms gives the OS a chance to schedule other work (including
+             * GPU inference) while still being fast enough for responsive
+             * input processing. */
             struct timespec ts = {0, 1000000L};  /* 1 ms */
             nanosleep(&ts, NULL);
         }

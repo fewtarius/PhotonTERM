@@ -128,6 +128,11 @@ void photon_sdl_fill_rect(photon_sdl_t *ctx,
 /* Flush pending draw calls to the screen. */
 void photon_sdl_present(photon_sdl_t *ctx);
 
+/* Reset the per-frame glyph cache miss counter.  Call at the start of
+ * each render frame (before photon_sdl_repaint) to allow a fresh budget
+ * of TTF glyph cache misses.  Default budget is 64 new glyphs per frame. */
+void photon_sdl_reset_glyph_budget(photon_sdl_t *ctx);
+
 /* Force a full repaint from the VTE's cell grid. */
 void photon_sdl_repaint(photon_sdl_t *ctx, vte_t *vte);
 void photon_sdl_invalidate(photon_sdl_t *ctx);

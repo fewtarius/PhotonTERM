@@ -49,6 +49,16 @@ static void *s_key_hook_userdata = NULL;
 static uint64_t s_last_render = 0;
 static const uint64_t FRAME_MS = 16;   /* ~60 fps render cap */
 
+/* Force next render to happen regardless of frame timer.
+ * Set by tab switch, resize, and other UI events that need
+ * immediate visual feedback. */
+static bool s_force_render = false;
+
+void photon_term_render_force_next(void)
+{
+    s_force_render = true;
+}
+
 void photon_term_set_session_menu(photon_session_menu_fn fn, void *userdata)
 {
     s_session_menu_fn = fn;
@@ -805,7 +815,8 @@ void photon_term_render(photon_sdl_t *sdl, vte_t *vte,
     bool sel_live = photon_sdl_sel_active(sdl);
     bool alt_held = (SDL_GetModState() & (KMOD_LALT | KMOD_RALT)) != 0;
 
-    if (dirty || sel_live || (t - s_last_render) >= FRAME_MS) {
+    if (dirty || sel_live || s_force_render || (t - s_last_render) >= FRAME_MS) {
+        s_force_render = false;
         photon_sdl_repaint(sdl, vte);
         if (alt_held && tabbar && tabbar->ntabs > 1) {
             draw_alt_overlay(sdl, tabbar);

@@ -300,6 +300,15 @@ struct photon_sdl {
 
     /* TTF glyph texture cache (heap-allocated, ~200KB) */
     glyph_cache_t *glyph_cache;
+
+    /* Per-frame glyph cache miss budget: limits how many new TTF glyphs
+     * are rendered per frame.  Under GPU contention (e.g. local LLM
+     * inference), each TTF_RenderGlyph32 + CreateTexture call can take
+     * 10-50ms.  Capping misses per frame prevents a full-screen redraw
+     * from stalling the main loop for seconds.  Missed glyphs render
+     * as blank cells and are retried on subsequent frames. */
+    int           glyph_miss_budget;  /* max new glyphs per frame */
+    int           glyph_miss_count;   /* glyphs rendered this frame */
 };
 
 /* ── Static error buffer ────────────────────────────────────────────── */
@@ -473,7 +482,7 @@ photon_sdl_t *photon_sdl_create(const char *title,
     }
 
     SDL_Renderer *ren = SDL_CreateRenderer(win, -1,
-        SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+        SDL_RENDERER_ACCELERATED);
     if (!ren) {
         snprintf(s_last_error, sizeof(s_last_error),
                  "SDL_CreateRenderer: %s", SDL_GetError());
@@ -615,6 +624,15 @@ photon_sdl_t *photon_sdl_create(const char *title,
 
     /* Allocate TTF glyph texture cache */
     ctx->glyph_cache = calloc(1, sizeof(glyph_cache_t));
+
+    /* Per-frame glyph cache miss budget: allow 64 new TTF glyph renders
+     * per frame.  Under GPU contention, each miss can take 10-50ms, so
+     * 64 misses = ~640ms worst case per frame.  This is a reasonable
+     * tradeoff: enough to fill a line of new text quickly, but not so
+     * many that a full-screen redraw stalls the UI for seconds.
+     * Reset each frame by photon_sdl_reset_glyph_budget(). */
+    ctx->glyph_miss_budget = 64;
+    ctx->glyph_miss_count  = 0;
 
     /* Direct all rendering to the offscreen render-target texture.
      * This persists across SDL_RenderPresent() calls (unlike the default
@@ -1160,7 +1178,16 @@ void photon_sdl_draw_cell(photon_sdl_t *ctx, int col, int row,
             };
             SDL_RenderCopy(ctx->ren, cached, &src, &gdst);
         } else {
-            /* Cache miss - render glyph, cache the texture */
+            /* Cache miss - render glyph, cache the texture.
+             * Under GPU contention (e.g. local LLM inference), each
+             * TTF_RenderGlyph32 + CreateTexture call can take 10-50ms.
+             * Limit new glyph renders per frame to avoid stalling. */
+            if (ctx->glyph_miss_budget > 0 &&
+                ctx->glyph_miss_count >= ctx->glyph_miss_budget) {
+                /* Budget exhausted - skip this glyph, render as blank.
+                 * It will be retried on a subsequent frame. */
+                return;
+            }
             TTF_Font *render_font = ctx->font;
             if (render_font && !TTF_GlyphIsProvided32(render_font, cp) &&
                 ctx->emoji_font && TTF_GlyphIsProvided32(ctx->emoji_font, cp)) {
@@ -1172,6 +1199,7 @@ void photon_sdl_draw_cell(photon_sdl_t *ctx, int col, int row,
                 SDL_Texture *tex = SDL_CreateTextureFromSurface(ctx->ren, surf);
                 SDL_FreeSurface(surf);
                 if (tex) {
+                    ctx->glyph_miss_count++;
                     SDL_QueryTexture(tex, NULL, NULL, &gw, &gh);
                     SDL_Rect src  = { 0, 0, gw, gh };
                     SDL_Rect gdst = {
@@ -1352,6 +1380,14 @@ void photon_sdl_present(photon_sdl_t *ctx)
     SDL_SetRenderTarget(ctx->ren, ctx->texture);
 }
 
+/* Reset per-frame glyph cache miss budget.  Called at the start of each
+ * render frame so that a fresh budget of TTF glyph renders is available. */
+void photon_sdl_reset_glyph_budget(photon_sdl_t *ctx)
+{
+    if (ctx)
+        ctx->glyph_miss_count = 0;
+}
+
 /* ── Connecting splash ──────────────────────────────────────────────── */
 
 void photon_sdl_show_connecting(photon_sdl_t *ctx, const char *bbs_name)
@@ -1451,6 +1487,9 @@ void photon_sdl_repaint_shadow(photon_sdl_t *ctx)
 void photon_sdl_repaint(photon_sdl_t *ctx, vte_t *vte)
 {
     if (!ctx || !vte) return;
+
+    /* Reset per-frame glyph budget so new TTF glyphs can be rendered */
+    ctx->glyph_miss_count = 0;
 
     /* Flush palette dirty: invalidate shadow so every cell re-renders
      * with the new palette RGB mapping. */
