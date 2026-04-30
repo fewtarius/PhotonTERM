@@ -768,6 +768,16 @@ photon_term_result_t photon_term_handle_key(const photon_key_t *k,
         return PHOTON_TERM_SWITCH_TAB;
     }
 
+    /* Alt-Left / Alt-Right: prev/next tab */
+    if ((k->mod & PHOTON_MOD_ALT) && k->code == PHOTON_KEY_LEFT) {
+        photon_switch_tab_target = (tabbar->active - 1 + tabbar->ntabs) % tabbar->ntabs;
+        return PHOTON_TERM_SWITCH_TAB;
+    }
+    if ((k->mod & PHOTON_MOD_ALT) && k->code == PHOTON_KEY_RIGHT) {
+        photon_switch_tab_target = (tabbar->active + 1) % tabbar->ntabs;
+        return PHOTON_TERM_SWITCH_TAB;
+    }
+
     /* Ctrl-\: force disconnect */
     if ((k->mod & PHOTON_MOD_CTRL) && k->code == '\\') {
         PHOTON_DBG("force disconnect via Ctrl-\\");
