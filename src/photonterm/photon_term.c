@@ -77,17 +77,64 @@ void photon_term_set_key_hook(photon_key_hook_fn fn, void *userdata)
     s_key_hook_userdata = userdata;
 }
 
-/* ── Alt-held tab bar overlay ────────────────────────────────────────── */
+/* ── Tab bar / status bar ──────────────────────────────────────────── *
+ * Drawn on the last row of the SDL grid every frame.
+ * Multi-tab: 1:name* | 2:name | W=New  (Alt-held adds more hints)
+ * Single-tab: name  SSH  Alt-Z=Menu
+ * The VTE is sized rows-1 when ntabs > 1 so the bar row is reserved.
+ * For single-tab, the bar overlays the last VTE row (repainted next frame). */
 
-static void draw_alt_overlay(photon_sdl_t *sdl, const photon_tab_bar_t *tabbar)
+static void draw_tab_bar(photon_sdl_t *sdl, const photon_tab_bar_t *tabbar,
+                         bool alt_held)
 {
-    if (!sdl || !tabbar || tabbar->ntabs <= 1) return;
+    if (!sdl || !tabbar || tabbar->ntabs < 1) return;
 
     int cols = photon_sdl_cols(sdl);
     int rows = photon_sdl_rows(sdl);
     int bar_row = rows;
     int col = 1;
 
+    /* Connection type label for the active tab */
+    const char *proto;
+    switch (tabbar->conn_type) {
+        case PHOTON_CONN_SSH:    proto = "SSH"; break;
+        case PHOTON_CONN_SHELL:  proto = "Shell"; break;
+        default:                  proto = "Telnet"; break;
+    }
+
+    if (tabbar->ntabs == 1) {
+        /* Single-tab status line: name  proto  Alt-Z=Menu */
+        char left[96];
+        snprintf(left, sizeof(left), " %s  %s ", tabbar->names[0], proto);
+        for (int j = 0; left[j] && col <= cols; j++, col++) {
+            vte_cell_t cell = { (uint32_t)(unsigned char)left[j], 7, 0, 0 };
+            photon_sdl_draw_cell(sdl, col, bar_row, &cell);
+        }
+
+        /* Right-aligned hint */
+        const char *hint = alt_held ? "Alt-Z=Menu  Alt-W=New" : "Alt-Z=Menu";
+        int hlen = (int)strlen(hint);
+        int start = cols - hlen + 1;
+        if (start > col) {
+            /* Fill gap with spaces */
+            while (col < start) {
+                vte_cell_t sp = { ' ', 7, 0, 0 };
+                photon_sdl_draw_cell(sdl, col++, bar_row, &sp);
+            }
+        }
+        for (int j = 0; hint[j] && col <= cols; j++, col++) {
+            vte_cell_t cell = { (uint32_t)(unsigned char)hint[j], 3, 0, 0 };
+            photon_sdl_draw_cell(sdl, col, bar_row, &cell);
+        }
+
+        while (col <= cols) {
+            vte_cell_t blank = { ' ', 7, 0, 0 };
+            photon_sdl_draw_cell(sdl, col++, bar_row, &blank);
+        }
+        return;
+    }
+
+    /* Multi-tab bar: 1:name* | 2:name | hints */
     for (int i = 0; i < tabbar->ntabs && col <= cols; i++) {
         char label[72];
         snprintf(label, sizeof(label), " %d:%s%s ",
@@ -109,7 +156,8 @@ static void draw_alt_overlay(photon_sdl_t *sdl, const photon_tab_bar_t *tabbar)
         }
     }
 
-    const char *hint = " W=New ";
+    /* Hints (always visible for multi-tab; Alt-held adds more) */
+    const char *hint = alt_held ? " W=New  1-9=Switch " : " Alt=Switch ";
     for (int j = 0; hint[j] && col <= cols; j++, col++) {
         vte_cell_t cell = { (uint32_t)(unsigned char)hint[j], 3, 0, 0 };
         photon_sdl_draw_cell(sdl, col, bar_row, &cell);
@@ -705,6 +753,7 @@ photon_term_result_t photon_term_handle_key(const photon_key_t *k,
         || (k->code == PHOTON_KEY_UP && (k->mod & PHOTON_MOD_META))
         || k->code == PHOTON_KEY_SCROLL_UP) {
         run_scrollback_viewer(vte, sdl);
+        photon_sdl_invalidate(sdl);
         return PHOTON_TERM_CONTINUE;
     }
 
@@ -713,6 +762,7 @@ photon_term_result_t photon_term_handle_key(const photon_key_t *k,
         bool was_ttf = photon_sdl_get_ttf_mode(sdl);
         uint8_t saved_pal[768];
         photon_sdl_save_palette(sdl, saved_pal);
+        photon_palette_mode_t ses_pm = bbs ? bbs->palette_mode : PHOTON_PALETTE_AUTO;
         photon_sdl_set_ttf_mode(sdl, false);
         photon_theme_apply(photon_active_theme, sdl, NULL);
 
@@ -721,6 +771,8 @@ photon_term_result_t photon_term_handle_key(const photon_key_t *k,
                 ui, sdl, vte, bbs, settings, s_session_menu_userdata);
             photon_sdl_restore_palette(sdl, saved_pal);
             photon_sdl_set_ttf_mode(sdl, was_ttf);
+            photon_sdl_apply_palette_mode(sdl, ses_pm,
+                bbs ? bbs->conn_type : PHOTON_CONN_TELNET);
             photon_sdl_invalidate(sdl);
             if (mr == PHOTON_TERM_RESUME)
                 return PHOTON_TERM_CONTINUE;
@@ -731,6 +783,8 @@ photon_term_result_t photon_term_handle_key(const photon_key_t *k,
 
         photon_sdl_restore_palette(sdl, saved_pal);
         photon_sdl_set_ttf_mode(sdl, was_ttf);
+        photon_sdl_apply_palette_mode(sdl, ses_pm,
+            bbs ? bbs->conn_type : PHOTON_CONN_TELNET);
         photon_sdl_invalidate(sdl);
         switch (m) {
             case SESSION_MENU_DISCONNECT:
@@ -741,8 +795,12 @@ photon_term_result_t photon_term_handle_key(const photon_key_t *k,
                 return PHOTON_TERM_QUIT;
             case SESSION_MENU_SETTINGS:
                 if (settings) {
+                    uint8_t settings_pal[768];
+                    photon_theme_push_palette(sdl, settings_pal);
                     photon_bbslist_run_settings(ui, settings);
-                    photon_theme_apply(photon_active_theme, sdl, settings);
+                    photon_theme_pop_palette(sdl, settings_pal);
+                    photon_sdl_apply_palette_mode(sdl, ses_pm,
+                        bbs ? bbs->conn_type : PHOTON_CONN_TELNET);
                 }
                 photon_sdl_invalidate(sdl);
                 return PHOTON_TERM_CONTINUE;
@@ -828,14 +886,10 @@ void photon_term_render(photon_sdl_t *sdl, vte_t *vte,
     if (dirty || sel_live || s_force_render || (t - s_last_render) >= FRAME_MS) {
         s_force_render = false;
         photon_sdl_repaint(sdl, vte);
-        if (alt_held && tabbar && tabbar->ntabs > 1) {
-            draw_alt_overlay(sdl, tabbar);
-            alt_overlay_active = true;
-        } else if (alt_overlay_active) {
-            photon_sdl_invalidate_range(sdl,
-                photon_sdl_rows(sdl) - 1, photon_sdl_rows(sdl) - 1);
-            alt_overlay_active = false;
-        }
+        /* Draw tab bar / status line on the last row every frame */
+        if (tabbar && tabbar->ntabs >= 1)
+            draw_tab_bar(sdl, tabbar, alt_held);
+        alt_overlay_active = alt_held;
         if (s_render_overlay_fn)
             s_render_overlay_fn(sdl, vte, s_render_overlay_userdata);
         photon_sdl_present(sdl);

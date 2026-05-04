@@ -16,7 +16,7 @@
 
 #include "photon_conn.h"
 
-/* ── Tab bar overlay (shown while Alt is held) ──────────────────────── */
+/* ── Tab bar / status bar ──────────────────────────────────────────── */
 
 #define PHOTON_TAB_BAR_MAX 9
 
@@ -25,6 +25,7 @@ typedef struct {
     int   active;       /* 0-based index of active tab */
     char  names[PHOTON_TAB_BAR_MAX][64];
     bool  activity[PHOTON_TAB_BAR_MAX];  /* unseen activity flag */
+    photon_conn_type_t conn_type;        /* active tab's connection type */
 } photon_tab_bar_t;
 
 

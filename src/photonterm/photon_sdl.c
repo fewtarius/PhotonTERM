@@ -884,6 +884,7 @@ void photon_sdl_load_xterm_palette(photon_sdl_t *ctx)
 {
     if (!ctx) return;
     init_xterm_256(ctx->pal);
+    ctx->pal_dirty = true;
     PHOTON_DBG("palette: loaded xterm-256 (pal[1]=#%02x%02x%02x pal[2]=#%02x%02x%02x)",
                ctx->pal[1].r, ctx->pal[1].g, ctx->pal[1].b,
                ctx->pal[2].r, ctx->pal[2].g, ctx->pal[2].b);
@@ -893,6 +894,7 @@ void photon_sdl_load_ansi_palette(photon_sdl_t *ctx)
 {
     if (!ctx) return;
     init_ansi_sgr_16(ctx->pal);
+    ctx->pal_dirty = true;
 }
 
 /* Alias: old name kept so existing callers still compile. */

@@ -116,48 +116,11 @@ static photon_tab_t tabs[PHOTON_MAX_TABS];
 static int          ntabs      = 0;
 static int          active_tab = 0;  /* 0-based */
 
-/* Render the tab bar (bottom row) for the active tab list. */
-static void render_tab_bar(photon_sdl_t *sdl)
-{
-    if (ntabs <= 1) return;
-
-    int cols = photon_sdl_cols(sdl);
-    int rows = photon_sdl_rows(sdl);
-    int bar_row = rows;
-
-    int col = 1;
-    for (int i = 0; i < ntabs; i++) {
-        if (!tabs[i].active) continue;
-        char label[72];
-        snprintf(label, sizeof(label), "[%d:%s%s]",
-                 i + 1, tabs[i].name,
-                 tabs[i].activity ? "*" : "");
-
-        bool is_active = (i == active_tab);
-        uint8_t fg  = is_active ? 15 : 7;
-        uint8_t bg  = is_active ?  4 : 0;
-        uint8_t att = is_active ? VTE_ATTR_BOLD : 0;
-
-        for (int j = 0; label[j] && col <= cols; j++, col++) {
-            vte_cell_t cell = { (uint32_t)(unsigned char)label[j], fg, bg, att };
-            photon_sdl_draw_cell(sdl, col, bar_row, &cell);
-        }
-        if (col <= cols) {
-            vte_cell_t sp = { ' ', 7, 0, 0 };
-            photon_sdl_draw_cell(sdl, col++, bar_row, &sp);
-        }
-    }
-    while (col <= cols) {
-        vte_cell_t blank = { ' ', 7, 0, 0 };
-        photon_sdl_draw_cell(sdl, col++, bar_row, &blank);
-    }
-    photon_sdl_present(sdl);
-}
-
 /* Build tab bar info struct for passing to photon_term functions. */
 static photon_tab_bar_t build_tab_bar(void)
 {
     photon_tab_bar_t tb = { .ntabs = ntabs, .active = active_tab };
+    tb.conn_type = tabs[active_tab].bbs ? tabs[active_tab].bbs->conn_type : PHOTON_CONN_TELNET;
     for (int i = 0; i < ntabs && i < PHOTON_TAB_BAR_MAX; i++) {
         strlcpy(tb.names[i], tabs[i].name, sizeof(tb.names[0]));
         tb.activity[i] = tabs[i].activity;
@@ -169,7 +132,6 @@ static photon_tab_bar_t build_tab_bar(void)
 static void switch_tab(photon_sdl_t *sdl, photon_settings_t *settings, int idx)
 {
     if (idx < 0 || idx >= PHOTON_MAX_TABS || !tabs[idx].active) return;
-    if (idx == active_tab) return;
 
     tabs[active_tab].activity = false;
     active_tab = idx;
@@ -198,18 +160,17 @@ static void switch_tab(photon_sdl_t *sdl, photon_settings_t *settings, int idx)
     photon_sdl_clear(sdl);
     photon_sdl_invalidate(sdl);
     vte_repaint(tabs[active_tab].vte);
-    render_tab_bar(sdl);
     photon_sdl_present(sdl);
     photon_term_render_force_next();
 }
 
-/* Resize all tab VTEs to account for tab bar row.
- * When ntabs > 1, the last row is reserved for the tab bar. */
+/* Resize all tab VTEs to account for status bar row.
+ * The last row is always reserved for the status bar. */
 static void resize_tabs_for_bar(photon_sdl_t *sdl)
 {
     int nc = photon_sdl_cols(sdl);
-    int nr = photon_sdl_rows(sdl);
-    int term_rows = (ntabs > 1) ? nr - 1 : nr;
+    int nr = photon_sdl_rows(sdl) - 1;
+    int term_rows = nr;
     if (term_rows < 1) term_rows = 1;
     for (int i = 0; i < ntabs; i++) {
         if (tabs[i].active) {
@@ -304,7 +265,7 @@ static int create_and_connect_tab(photon_sdl_t *sdl, photon_ui_t *ui,
 
     /* Auto-detect window size (account for tab bar row) */
     if (settings->cols == 0 && settings->rows == 0) {
-        int term_rows = (ntabs > 1) ? photon_sdl_rows(sdl) - 1 : photon_sdl_rows(sdl);
+        int term_rows = photon_sdl_rows(sdl) - 1;
         if (term_rows < 1) term_rows = 1;
         bbs->init_cols = photon_sdl_cols(sdl);
         bbs->init_rows = term_rows;
@@ -344,7 +305,6 @@ static int create_and_connect_tab(photon_sdl_t *sdl, photon_ui_t *ui,
     }
 
     PHOTON_DBG("tab %d: connected", slot);
-    render_tab_bar(sdl);
     return slot;
 }
 
@@ -625,8 +585,8 @@ int main(int argc, char **argv)
                 /* Check for window resize (fullscreen toggle, user drag) */
                 int nc = 0, nr = 0;
                 if (photon_sdl_check_resize(sdl, &nc, &nr)) {
-                    /* Reserve one row for tab bar when multiple tabs open */
-                    int term_rows = (ntabs > 1) ? nr - 1 : nr;
+                    /* Reserve one row for status bar */
+                    int term_rows = nr - 1;
                     if (term_rows < 1) term_rows = 1;
                     for (int i = 0; i < ntabs; i++) {
                         if (tabs[i].active)
