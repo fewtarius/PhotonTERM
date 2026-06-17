@@ -945,10 +945,31 @@ void photon_term_render(photon_sdl_t *sdl, vte_t *vte,
     if (dirty || sel_live || s_force_render || (t - s_last_render) >= FRAME_MS) {
         s_force_render = false;
 
-        /* Update layout and set viewport for VTE rendering */
+        /* Update layout. Use externally-set viewport if the caller
+         * (e.g. MIRA) has already configured one; otherwise compute
+         * the default viewport from the window size. */
         layout_update(sdl);
-        photon_sdl_set_viewport(sdl, s_layout.vp_x, s_layout.vp_y,
-                                s_layout.vp_w, s_layout.vp_h);
+        {
+            int ext_vp_x, ext_vp_y, ext_vp_w, ext_vp_h;
+            photon_sdl_get_viewport(sdl, &ext_vp_x, &ext_vp_y,
+                                    &ext_vp_w, &ext_vp_h);
+            if (ext_vp_w > 0 && ext_vp_h > 0) {
+                /* Caller has set a custom viewport - use it but update
+                 * grid dimensions from the current window size */
+                s_layout.vp_x = ext_vp_x;
+                s_layout.vp_y = ext_vp_y;
+                s_layout.vp_w = ext_vp_w;
+                s_layout.vp_h = ext_vp_h;
+                s_layout.term_cols = ext_vp_w /
+                    (s_layout.cell_w > 0 ? s_layout.cell_w : 1);
+                s_layout.term_rows = ext_vp_h /
+                    (s_layout.cell_h > 0 ? s_layout.cell_h : 1);
+                if (s_layout.term_cols < 20) s_layout.term_cols = 20;
+                if (s_layout.term_rows < 5) s_layout.term_rows = 5;
+            }
+            photon_sdl_set_viewport(sdl, s_layout.vp_x, s_layout.vp_y,
+                                    s_layout.vp_w, s_layout.vp_h);
+        }
 
         photon_sdl_repaint(sdl, vte);
 
