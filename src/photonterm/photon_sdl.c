@@ -403,11 +403,11 @@ static void photon_sdl_fix_scale(photon_sdl_t *ctx)
 
     SDL_Rect vp;
     SDL_RenderGetViewport(ctx->ren, &vp);
-    if (vp.w != want_w || vp.h != want_h) {
-        SDL_RenderSetViewport(ctx->ren, &(SDL_Rect){0, 0, want_w, want_h});
-        PHOTON_DBG("fix_scale: target=%s vp %dx%d -> %dx%d (want %dx%d)",
-                   target ? "tex" : "scr", vp.w, vp.h,
+    if (vp.w != want_w || vp.h != want_h || vp.x != 0 || vp.y != 0) {
+        PHOTON_DBG("fix_scale: target=%s vp %d,%d %dx%d -> %dx%d (want %dx%d)",
+                   target ? "tex" : "scr", vp.x, vp.y, vp.w, vp.h,
                    want_w, want_h, want_w, want_h);
+        SDL_RenderSetViewport(ctx->ren, &(SDL_Rect){0, 0, want_w, want_h});
     }
 }
 
@@ -1583,6 +1583,12 @@ void photon_sdl_present(photon_sdl_t *ctx)
     /* Re-activate the render target for the next frame's draw calls */
     SDL_SetRenderTarget(ctx->ren, ctx->texture);
     photon_sdl_fix_scale(ctx);
+    {
+        SDL_Rect vp2;
+        SDL_RenderGetViewport(ctx->ren, &vp2);
+        PHOTON_DBG("present: after fix_scale tex vp=%d,%d %dx%d (want %dx%d)",
+                   vp2.x, vp2.y, vp2.w, vp2.h, ctx->win_w, ctx->win_h);
+    }
 }
 
 /* Reset per-frame glyph cache miss budget.  Called at the start of each
