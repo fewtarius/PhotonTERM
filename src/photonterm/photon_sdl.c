@@ -1058,6 +1058,21 @@ void photon_sdl_load_cga_palette(photon_sdl_t *ctx)
     photon_sdl_load_ansi_palette(ctx);
 }
 
+/* Get the RGB values for a palette index (0-255). */
+void photon_sdl_get_palette_rgb(const photon_sdl_t *ctx, int index,
+                                uint8_t *r, uint8_t *g, uint8_t *b)
+{
+    if (!ctx || index < 0 || index > 255) {
+        if (r) *r = 0;
+        if (g) *g = 0;
+        if (b) *b = 0;
+        return;
+    }
+    if (r) *r = ctx->pal[index].r;
+    if (g) *g = ctx->pal[index].g;
+    if (b) *b = ctx->pal[index].b;
+}
+
 /* Forward declaration - defined after colour helpers */
 static SDL_Rect cell_rect(const photon_sdl_t *ctx, int col, int row);
 

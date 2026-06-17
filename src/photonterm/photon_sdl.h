@@ -225,6 +225,11 @@ void photon_sdl_load_ansi_palette(photon_sdl_t *ctx);
 /* Deprecated alias for photon_sdl_load_ansi_palette(). */
 void photon_sdl_load_cga_palette(photon_sdl_t *ctx);
 
+/* Get the RGB values for a palette index (0-255).
+ * Returns the current palette colour for the given index. */
+void photon_sdl_get_palette_rgb(const photon_sdl_t *ctx, int index,
+                                uint8_t *r, uint8_t *g, uint8_t *b);
+
 /* Set Unicode/TTF rendering mode.  When enabled, the CP437 bitmap atlas is
  * skipped and all glyphs are rendered via SDL2_ttf (full Unicode coverage).
  * When disabled (default), the CP437 atlas is used for ASCII/CP437 chars. */
