@@ -73,6 +73,12 @@ void photon_term_set_key_hook(photon_key_hook_fn fn, void *userdata);
 
 /* ── Unified main loop API ──────────────────────────────────────────── */
 
+/* Install the tab bar mouse filter on the SDL context.
+ * Intercepts clicks in the tab bar area to prevent text selection
+ * starting in the chrome region. Call once after creating the SDL context. */
+void photon_term_install_mouse_filter(photon_sdl_t *sdl);
+
+
 /* Non-blocking: drain data from connection into VTE for one tab.
  * For background tabs (is_active=false), only processes data (no rendering).
  * For active tab, also handles rendering if dirty.

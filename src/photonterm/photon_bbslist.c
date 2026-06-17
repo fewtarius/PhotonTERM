@@ -558,7 +558,29 @@ static void run_settings(photon_ui_t *ui, photon_settings_t *s)
         if (!photon_sdl_wait_key(photon_ui_sdl(ui), &key, 100)) {
             if (photon_sdl_take_expose(photon_ui_sdl(ui)))
                 redraw = true;
+            /* Resize UI VTE to match new grid dimensions */
+            {
+                vte_t *uv = photon_ui_vte(ui);
+                photon_sdl_t *sdl = photon_ui_sdl(ui);
+                if (uv && sdl && (vte_cols(uv) != photon_sdl_cols(sdl) ||
+                                  vte_rows(uv) != photon_sdl_rows(sdl))) {
+                    vte_resize(uv, photon_sdl_cols(sdl), photon_sdl_rows(sdl));
+                    redraw = true;
+                }
+            }
             continue;
+        }
+        if (photon_sdl_take_expose(photon_ui_sdl(ui)))
+            redraw = true;
+        /* Resize UI VTE to match new grid dimensions */
+        {
+            vte_t *uv = photon_ui_vte(ui);
+            photon_sdl_t *sdl = photon_ui_sdl(ui);
+            if (uv && sdl && (vte_cols(uv) != photon_sdl_cols(sdl) ||
+                              vte_rows(uv) != photon_sdl_rows(sdl))) {
+                vte_resize(uv, photon_sdl_cols(sdl), photon_sdl_rows(sdl));
+                redraw = true;
+            }
         }
         if (key.code == 0) continue;
 
@@ -893,7 +915,29 @@ static photon_bbs_t *run_directory(photon_ui_t *ui, photon_settings_t *s,
             /* Check for window expose/resize while idle */
             if (photon_sdl_take_expose(photon_ui_sdl(ui)))
                 redraw = true;
+            /* Resize UI VTE to match new grid dimensions */
+            vte_t *uv = photon_ui_vte(ui);
+            photon_sdl_t *sdl = photon_ui_sdl(ui);
+            if (uv && sdl && (vte_cols(uv) != photon_sdl_cols(sdl) ||
+                              vte_rows(uv) != photon_sdl_rows(sdl))) {
+                vte_resize(uv, photon_sdl_cols(sdl), photon_sdl_rows(sdl));
+                redraw = true;
+            }
             continue;
+        }
+        /* Always check expose after processing events - resize may have
+         * cleared the render target and we need to redraw. */
+        if (photon_sdl_take_expose(photon_ui_sdl(ui)))
+            redraw = true;
+        /* Resize UI VTE to match new grid dimensions */
+        {
+            vte_t *uv = photon_ui_vte(ui);
+            photon_sdl_t *sdl = photon_ui_sdl(ui);
+            if (uv && sdl && (vte_cols(uv) != photon_sdl_cols(sdl) ||
+                              vte_rows(uv) != photon_sdl_rows(sdl))) {
+                vte_resize(uv, photon_sdl_cols(sdl), photon_sdl_rows(sdl));
+                redraw = true;
+            }
         }
         if (key.code == 0) continue;
 
@@ -1051,7 +1095,29 @@ photon_bbs_t *photon_bbslist_run(photon_ui_t *ui, bool start_in_directory,
             if (!photon_sdl_wait_key(photon_ui_sdl(ui), &key, 200)) {
                 if (photon_sdl_take_expose(photon_ui_sdl(ui)))
                     redraw_splash = true;
+                /* Resize UI VTE to match new grid dimensions */
+                {
+                    vte_t *uv = photon_ui_vte(ui);
+                    photon_sdl_t *sdl = photon_ui_sdl(ui);
+                    if (uv && sdl && (vte_cols(uv) != photon_sdl_cols(sdl) ||
+                                      vte_rows(uv) != photon_sdl_rows(sdl))) {
+                        vte_resize(uv, photon_sdl_cols(sdl), photon_sdl_rows(sdl));
+                        redraw_splash = true;
+                    }
+                }
                 continue;
+            }
+            if (photon_sdl_take_expose(photon_ui_sdl(ui)))
+                redraw_splash = true;
+            /* Resize UI VTE to match new grid dimensions */
+            {
+                vte_t *uv = photon_ui_vte(ui);
+                photon_sdl_t *sdl = photon_ui_sdl(ui);
+                if (uv && sdl && (vte_cols(uv) != photon_sdl_cols(sdl) ||
+                                  vte_rows(uv) != photon_sdl_rows(sdl))) {
+                    vte_resize(uv, photon_sdl_cols(sdl), photon_sdl_rows(sdl));
+                    redraw_splash = true;
+                }
             }
             if (key.code == 0) continue;
 

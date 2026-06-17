@@ -289,6 +289,21 @@ struct photon_sdl {
      * exiting fullscreen, before the compositor sends the resize event). */
     int           pre_fullscreen_win_w;
     int           pre_fullscreen_win_h;
+    int           pre_fullscreen_font_pt;  /* font size saved on fullscreen enter */
+
+    /* When true, photon_sdl_present skips the blit.  Set during fullscreen
+     * transitions to avoid flashing stale content at the wrong grid size.
+     * Cleared when the WINDOWEVENT handler processes the resize. */
+    bool          skip_present;
+
+    /* When true, photon_sdl_set_font_size skips SDL_SetWindowSize.
+     * Used by the WINDOWEVENT handler to prevent resize feedback loops
+     * in fixed-grid mode. */
+    bool          no_window_resize;
+
+    /* When true, the WINDOWEVENT handler skips font size recalculation.
+     * Used during fullscreen exit to preserve the original font size. */
+    bool          no_font_resize;
 
     /* Rendering mode.  When true, skip the CP437 bitmap atlas and render all
      * glyphs via TTF (Unicode/UTF-8 mode).  When false (default), use the
@@ -346,17 +361,21 @@ static void set_error(const char *msg)
  * SDL_SetRenderTarget() always resets the render scale to 1.0 and the
  * viewport to the target's full size.  On Retina/HiDPI displays we need
  * scale > 1.0 and viewport at logical pixel size.  Call this after every
- * SDL_SetRenderTarget() call to restore the correct state. */
+ * SDL_SetRenderTarget() call to restore the correct state.
+ *
+ * In fixed-grid mode, the grid may not fill the entire window.  The viewport
+ * offset centers the content so gaps appear evenly on all sides. */
 static void photon_sdl_fix_scale(photon_sdl_t *ctx)
 {
     if (!ctx || !ctx->ren) return;
-    if (ctx->initial_scale <= 1.0f) return;  /* no fix needed on 1x displays */
 
-    /* Restore render scale */
-    float cur_x, cur_y;
-    SDL_RenderGetScale(ctx->ren, &cur_x, &cur_y);
-    if (cur_x != ctx->initial_scale || cur_y != ctx->initial_scale) {
-        SDL_RenderSetScale(ctx->ren, ctx->initial_scale, ctx->initial_scale);
+    /* Restore render scale on Retina/HiDPI displays */
+    if (ctx->initial_scale > 1.0f) {
+        float cur_x, cur_y;
+        SDL_RenderGetScale(ctx->ren, &cur_x, &cur_y);
+        if (cur_x != ctx->initial_scale || cur_y != ctx->initial_scale) {
+            SDL_RenderSetScale(ctx->ren, ctx->initial_scale, ctx->initial_scale);
+        }
     }
 
     /* Fix viewport: SDL_SetRenderTarget resets it to the target's full size.
@@ -371,8 +390,13 @@ static void photon_sdl_fix_scale(photon_sdl_t *ctx)
         want_h = ctx->win_h;
     } else {
         /* Screen target: need viewport that maps to full physical screen */
-        want_w = (int)((float)ctx->draw_w / ctx->initial_scale);
-        want_h = (int)((float)ctx->draw_h / ctx->initial_scale);
+        if (ctx->initial_scale > 1.0f) {
+            want_w = (int)((float)ctx->draw_w / ctx->initial_scale);
+            want_h = (int)((float)ctx->draw_h / ctx->initial_scale);
+        } else {
+            want_w = ctx->draw_w;
+            want_h = ctx->draw_h;
+        }
     }
     if (want_w < 1) want_w = 1;
     if (want_h < 1) want_h = 1;
@@ -381,6 +405,9 @@ static void photon_sdl_fix_scale(photon_sdl_t *ctx)
     SDL_RenderGetViewport(ctx->ren, &vp);
     if (vp.w != want_w || vp.h != want_h) {
         SDL_RenderSetViewport(ctx->ren, &(SDL_Rect){0, 0, want_w, want_h});
+        PHOTON_DBG("fix_scale: target=%s vp %dx%d -> %dx%d (want %dx%d)",
+                   target ? "tex" : "scr", vp.w, vp.h,
+                   want_w, want_h, want_w, want_h);
     }
 }
 
@@ -393,6 +420,28 @@ static SDL_Texture *make_texture(SDL_Renderer *ren, int w, int h)
         SDL_TEXTUREACCESS_TARGET,
         w, h);
     return t;
+}
+
+/* Recreate the render-target texture to match the current window size.
+ * Called after fullscreen transitions and window resizes where the
+ * draw dimensions change before check_resize fires. */
+static void recreate_texture(photon_sdl_t *ctx)
+{
+    if (!ctx || !ctx->texture) return;
+    int tex_w = ctx->win_w;
+    int tex_h = ctx->win_h;
+    if (ctx->initial_scale > 1.0f) {
+        tex_w = (int)((float)tex_w * ctx->initial_scale);
+        tex_h = (int)((float)tex_h * ctx->initial_scale);
+    }
+    SDL_DestroyTexture(ctx->texture);
+    ctx->texture = make_texture(ctx->ren, tex_w, tex_h);
+    SDL_SetRenderTarget(ctx->ren, ctx->texture);
+    photon_sdl_fix_scale(ctx);
+    /* Clear the new texture so stale content from the old grid size
+     * doesn't flash during the transition. */
+    SDL_RenderClear(ctx->ren);
+    ctx->expose_pending = true;
 }
 
 /* ── Font search ────────────────────────────────────────────────────── */
@@ -846,8 +895,29 @@ bool photon_sdl_set_font_size(photon_sdl_t *ctx, int pt,
          * which are 2x the rendering logical size. Use photon_sdl_logical_size
          * to get the correct rendering logical size. */
         photon_sdl_logical_size(ctx, &new_win_w, &new_win_h);
-        new_grid_cols = new_win_w / cell_w;
-        new_grid_rows = new_win_h / cell_h;
+        if (ctx->fixed_cols > 0 && ctx->fixed_rows > 0) {
+            /* Fixed grid: use configured size, not window-derived size */
+            new_grid_cols = ctx->fixed_cols;
+            new_grid_rows = ctx->fixed_rows;
+        } else {
+            new_grid_cols = new_win_w / cell_w;
+            new_grid_rows = new_win_h / cell_h;
+        }
+        if (new_grid_cols < 1) new_grid_cols = 1;
+        if (new_grid_rows < 1) new_grid_rows = 1;
+    } else if (ctx->no_window_resize) {
+        /* Called from WINDOWEVENT handler or fullscreen enter: don't resize
+         * the window.  In fixed-grid mode, use the configured grid size.
+         * Otherwise, recompute grid from current window dimensions. */
+        new_win_w = ctx->win_w;
+        new_win_h = ctx->win_h;
+        if (ctx->fixed_cols > 0 && ctx->fixed_rows > 0) {
+            new_grid_cols = ctx->fixed_cols;
+            new_grid_rows = ctx->fixed_rows;
+        } else {
+            new_grid_cols = new_win_w / cell_w;
+            new_grid_rows = new_win_h / cell_h;
+        }
         if (new_grid_cols < 1) new_grid_cols = 1;
         if (new_grid_rows < 1) new_grid_rows = 1;
     } else {
@@ -877,8 +947,9 @@ bool photon_sdl_set_font_size(photon_sdl_t *ctx, int pt,
     ctx->cols   = new_grid_cols;
     ctx->rows   = new_grid_rows;
 
-    /* Resize SDL window */
-    if (!is_fullscreen)
+    /* Resize SDL window (skip when called from WINDOWEVENT handler to
+     * prevent resize feedback loops in fixed-grid mode). */
+    if (!is_fullscreen && !ctx->no_window_resize)
         SDL_SetWindowSize(ctx->win, new_win_w, new_win_h);
 
     /* Update HiDPI scale (window size changed).
@@ -930,8 +1001,11 @@ bool photon_sdl_set_font_size(photon_sdl_t *ctx, int pt,
 
     photon_sdl_present(ctx);
 
-    PHOTON_DBG("set_font_size: %dpt -> cell %dx%d, win %dx%d",
-               pt, cell_w, cell_h, new_win_w, new_win_h);
+    PHOTON_DBG("set_font_size: %dpt -> cell %dx%d, win %dx%d "
+               "fullscreen=%d fixed=%dx%d cols=%dx%d",
+               pt, cell_w, cell_h, new_win_w, new_win_h,
+               is_fullscreen, ctx->fixed_cols, ctx->fixed_rows,
+               ctx->cols, ctx->rows);
 
     if (new_cols) *new_cols = ctx->cols;
     if (new_rows) *new_rows = ctx->rows;
@@ -1453,12 +1527,44 @@ void photon_sdl_present(photon_sdl_t *ctx)
 {
     if (!ctx) return;
 
+    /* Skip presenting during fullscreen transitions to avoid flashing
+     * stale content at the wrong grid size.  The WINDOWEVENT handler
+     * clears this flag after processing the resize. */
+    if (ctx->skip_present) {
+        /* Still need to switch back to texture target for next frame */
+        SDL_SetRenderTarget(ctx->ren, ctx->texture);
+        photon_sdl_fix_scale(ctx);
+        return;
+    }
+
     /* Blit the persistent render-target texture to the screen back buffer.
      * All draw calls between presents go to ctx->texture (which retains
      * its content across frames), so the shadow-buffer skip optimisation
      * works correctly with double-buffered SDL. */
     SDL_SetRenderTarget(ctx->ren, NULL);
     photon_sdl_fix_scale(ctx);
+
+    /* Clear no_font_resize now that both WINDOWEVENTs have been processed
+     * and the frame is about to be presented. */
+    ctx->no_font_resize = false;
+
+    PHOTON_DBG("present: win=%dx%d draw=%dx%d retina=%.2f initial=%.2f "
+               "cols=%dx%d cell=%dx%d",
+               ctx->win_w, ctx->win_h, ctx->draw_w, ctx->draw_h,
+               ctx->retina_scale, ctx->initial_scale,
+               ctx->cols, ctx->rows, ctx->cell_w, ctx->cell_h);
+
+    /* Debug: log texture size and viewport */
+    if (ctx->texture) {
+        int tw, th;
+        SDL_QueryTexture(ctx->texture, NULL, NULL, &tw, &th);
+        SDL_Rect vp;
+        SDL_RenderGetViewport(ctx->ren, &vp);
+        float sx, sy;
+        SDL_RenderGetScale(ctx->ren, &sx, &sy);
+        PHOTON_DBG("present: tex=%dx%d vp=%dx%d scale=%.1fx%.1f",
+                   tw, th, vp.w, vp.h, sx, sy);
+    }
 
     SDL_RenderCopy(ctx->ren, ctx->texture, NULL, NULL);
 
@@ -1903,6 +2009,8 @@ static void translate_sdl_event(photon_sdl_t *ctx, const SDL_Event *ev)
             /* Temporarily switch to screen target to get physical size.
              * SDL_GetRendererOutputSize returns the current target's size,
              * which would be the texture if we're rendering to it. */
+            PHOTON_DBG("WINDOWEVENT %d: starting resize handling",
+                       ev->window.event);
             SDL_Texture *prev_target = SDL_GetRenderTarget(ctx->ren);
             SDL_SetRenderTarget(ctx->ren, NULL);
             SDL_GetRendererOutputSize(ctx->ren, &draw_w, &draw_h);
@@ -1922,18 +2030,68 @@ static void translate_sdl_event(photon_sdl_t *ctx, const SDL_Event *ev)
             ctx->win_w = log_w;
             ctx->win_h = log_h;
             if (ctx->fixed_cols > 0 && ctx->fixed_rows > 0) {
-                /* Fixed terminal size: scale the font to fit the configured
-                 * grid in the new window dimensions. */
-                int pt_w = log_w / ((ctx->fixed_cols + 1) / 2);  /* cell_w ~ pt/2 */
-                int pt_h = log_h / ctx->fixed_rows;               /* cell_h ~ pt */
-                int new_pt = pt_w < pt_h ? pt_w : pt_h;
-                if (new_pt < 6) new_pt = 6;
-                if (new_pt > 72) new_pt = 72;
-                /* Round down to even for cleaner glyph metrics */
-                new_pt &= ~1;
-                if (new_pt >= 6 && new_pt != ctx->font_pt) {
-                    int nc = 0, nr = 0;
-                    photon_sdl_set_font_size(ctx, new_pt, &nc, &nr);
+                bool is_fullscreen = (SDL_GetWindowFlags(ctx->win) &
+                    (SDL_WINDOW_FULLSCREEN | SDL_WINDOW_FULLSCREEN_DESKTOP)) != 0;
+                PHOTON_DBG("WINDOWEVENT fixed-grid: fullscreen=%d, cell=%dx%d, log=%dx%d",
+                           is_fullscreen, ctx->cell_w, ctx->cell_h, log_w, log_h);
+                if (is_fullscreen) {
+                    /* In fullscreen, expand the grid to fill the screen at the
+                     * current font size instead of scaling the font.  This
+                     * avoids black bars/gaps around the content. */
+                    if (ctx->cell_w > 0 && ctx->cell_h > 0) {
+                        int nc = log_w / ctx->cell_w;
+                        int nr = log_h / ctx->cell_h;
+                        if (nc < 1) nc = 1;
+                        if (nr < 1) nr = 1;
+                        if (nc != ctx->cols || nr != ctx->rows) {
+                            ctx->resize_pending = true;
+                            ctx->pending_cols   = nc;
+                            ctx->pending_rows   = nr;
+                        }
+                    }
+                } else {
+                    /* Windowed fixed-grid: scale the font to fit the configured
+                     * grid in the new window dimensions.  Skip if we're exiting
+                     * fullscreen and already restored the original font size. */
+                    if (ctx->no_font_resize) {
+                        /* Exiting fullscreen: font size already restored,
+                         * compute grid from window size and cell size
+                         * instead of using fixed grid dimensions. */
+                        if (ctx->cell_w > 0 && ctx->cell_h > 0) {
+                            int nc = log_w / ctx->cell_w;
+                            int nr = log_h / ctx->cell_h;
+                            if (nc < 1) nc = 1;
+                            if (nr < 1) nr = 1;
+                            if (nc != ctx->cols || nr != ctx->rows) {
+                                ctx->resize_pending = true;
+                                ctx->pending_cols   = nc;
+                                ctx->pending_rows   = nr;
+                            }
+                        }
+                    } else {
+                        int pt_w = log_w / ((ctx->fixed_cols + 1) / 2);
+                        int pt_h = log_h / ctx->fixed_rows;
+                        int new_pt = pt_w < pt_h ? pt_w : pt_h;
+                        if (new_pt < 6) new_pt = 6;
+                        if (new_pt > 72) new_pt = 72;
+                        new_pt &= ~1;
+                        if (new_pt >= 6 && new_pt != ctx->font_pt) {
+                            /* Prevent set_font_size from resizing the window -
+                             * we're already handling a window resize, and calling
+                             * SDL_SetWindowSize would trigger another WINDOWEVENT,
+                             * creating a feedback loop that shrinks the window. */
+                            ctx->no_window_resize = true;
+                            photon_sdl_set_font_size(ctx, new_pt, NULL, NULL);
+                            ctx->no_window_resize = false;
+                        } else if (ctx->cols != ctx->fixed_cols ||
+                                   ctx->rows != ctx->fixed_rows) {
+                            /* Font size unchanged but grid needs to snap back to
+                             * fixed size (e.g. leaving fullscreen). */
+                            ctx->resize_pending = true;
+                            ctx->pending_cols   = ctx->fixed_cols;
+                            ctx->pending_rows   = ctx->fixed_rows;
+                        }
+                    }
                 }
             } else if (ctx->cell_w > 0 && ctx->cell_h > 0) {
                 int nc = log_w / ctx->cell_w;
@@ -1945,6 +2103,24 @@ static void translate_sdl_event(photon_sdl_t *ctx, const SDL_Event *ev)
                     ctx->pending_cols   = nc;
                     ctx->pending_rows   = nr;
                 }
+            }
+            PHOTON_DBG("WINDOWEVENT %d: draw=%dx%d log=%dx%d pts=%dx%d "
+                       "retina=%.2f cols/rows=%dx%d pending=%d",
+                       ev->window.event, draw_w, draw_h, log_w, log_h,
+                       pts_w, pts_h, ctx->retina_scale,
+                       ctx->cols, ctx->rows, ctx->resize_pending);
+            /* Flag expose after resize so the UI redraws */
+            ctx->expose_pending = true;
+            /* Clear skip_present - the WINDOWEVENT handler has processed
+             * the resize, so it's safe to present again. */
+            ctx->skip_present = false;
+            /* Process the resize immediately while we have the correct
+             * draw_w/draw_h values.  Deferring to check_resize would
+             * use stale values because SDL returns old dimensions during
+             * fullscreen transitions on macOS Retina. */
+            if (ctx->resize_pending) {
+                int nc = 0, nr = 0;
+                photon_sdl_check_resize(ctx, &nc, &nr);
             }
         }
         if (ev->window.event == SDL_WINDOWEVENT_EXPOSED) {
@@ -2087,40 +2263,91 @@ static void translate_sdl_event(photon_sdl_t *ctx, const SDL_Event *ev)
     if (((mod & PHOTON_MOD_ALT) && (sym == SDLK_RETURN || sym == SDLK_KP_ENTER))
         || sym == SDLK_F11) {
         Uint32 flags = SDL_GetWindowFlags(ctx->win);
+        PHOTON_DBG("fullscreen toggle: current flags=0x%x, pre_fullscreen=%dx%d",
+                   flags, ctx->pre_fullscreen_win_w, ctx->pre_fullscreen_win_h);
         if (flags & (SDL_WINDOW_FULLSCREEN | SDL_WINDOW_FULLSCREEN_DESKTOP)) {
             /* Exiting fullscreen: restore saved windowed size.
              * The WINDOWEVENT from SDL_SetWindowFullscreen(0) will
-             * recompute the grid from the restored window size. */
+             * recompute the grid from the restored window size.
+             * Update draw_w/draw_h immediately to avoid stale values
+             * in any present call before the WINDOWEVENT fires.
+             * Skip presenting until the WINDOWEVENT handler processes
+             * the resize to avoid flashing stale content at wrong size. */
+            ctx->skip_present = true;
+            ctx->no_font_resize = true;  /* prevent WINDOWEVENT from changing font */
             SDL_SetWindowFullscreen(ctx->win, 0);
             if (ctx->pre_fullscreen_win_w > 0 && ctx->pre_fullscreen_win_h > 0) {
                 SDL_SetWindowSize(ctx->win,
                                   ctx->pre_fullscreen_win_w,
                                   ctx->pre_fullscreen_win_h);
+                ctx->win_w = ctx->pre_fullscreen_win_w;
+                ctx->win_h = ctx->pre_fullscreen_win_h;
+                ctx->draw_w = (int)((float)ctx->win_w * ctx->initial_scale);
+                ctx->draw_h = (int)((float)ctx->win_h * ctx->initial_scale);
+                ctx->retina_scale = ctx->initial_scale;
+                recreate_texture(ctx);
+                /* Restore the original font size so the windowed grid
+                 * matches what it was before entering fullscreen. */
+                if (ctx->pre_fullscreen_font_pt > 0 &&
+                    ctx->pre_fullscreen_font_pt != ctx->font_pt) {
+                    ctx->no_window_resize = true;
+                    photon_sdl_set_font_size(ctx, ctx->pre_fullscreen_font_pt, NULL, NULL);
+                    ctx->no_window_resize = false;
+                }
+                PHOTON_DBG("fullscreen exit: restored window to %dx%d font_pt=%d",
+                           ctx->pre_fullscreen_win_w, ctx->pre_fullscreen_win_h,
+                           ctx->font_pt);
             }
         } else {
-            /* Entering fullscreen: save current windowed size for later restore. */
+            /* Entering fullscreen: save current windowed size and font size
+             * for later restore.  Skip presenting until the WINDOWEVENT
+             * handler processes the resize to avoid flashing stale content. */
+            ctx->skip_present = true;
             SDL_GetWindowSize(ctx->win, &ctx->pre_fullscreen_win_w,
                              &ctx->pre_fullscreen_win_h);
+            ctx->pre_fullscreen_font_pt = ctx->font_pt;
+            PHOTON_DBG("fullscreen enter: saved windowed size %dx%d font_pt=%d",
+                       ctx->pre_fullscreen_win_w, ctx->pre_fullscreen_win_h,
+                       ctx->pre_fullscreen_font_pt);
             SDL_SetWindowFullscreen(ctx->win, SDL_WINDOW_FULLSCREEN_DESKTOP);
             /* Force a grid recalculation from the current window size.
              * On compositors like Gamescope the window is already fullscreen so
              * SDL_SetWindowFullscreen is a no-op and no WINDOWEVENT fires - we
              * must compute the grid ourselves.  On normal compositors the
              * WINDOWEVENT will also fire and do this, which is harmless since
-             * the values will be the same. */
+             * the values will be the same.
+             *
+             * IMPORTANT: SDL_GetRendererOutputSize may return stale values
+             * immediately after SDL_SetWindowFullscreen on macOS Retina.
+             * Compute draw_w/draw_h from SDL_GetWindowSize and initial_scale
+             * instead.  draw_w must be the device pixel size (pts * scale),
+             * not the rendering logical size (pts / scale * scale). */
             {
-                int draw_w, draw_h;
-                SDL_GetRendererOutputSize(ctx->ren, &draw_w, &draw_h);
-                int log_w, log_h;
-                photon_sdl_logical_size(ctx, &log_w, &log_h);
                 int pts_w, pts_h;
                 SDL_GetWindowSize(ctx->win, &pts_w, &pts_h);
+                int log_w, log_h;
+                photon_sdl_logical_size(ctx, &log_w, &log_h);
                 ctx->win_w = log_w;
                 ctx->win_h = log_h;
-                ctx->draw_w = draw_w;
-                ctx->draw_h = draw_h;
-                ctx->retina_scale = (pts_w > 0) ? (float)draw_w / (float)pts_w : 1.0f;
-                if (ctx->cell_w > 0 && ctx->cell_h > 0) {
+                ctx->draw_w = (int)((float)pts_w * ctx->initial_scale);
+                ctx->draw_h = (int)((float)pts_h * ctx->initial_scale);
+                ctx->retina_scale = ctx->initial_scale;
+                recreate_texture(ctx);
+                if (ctx->fixed_cols > 0 && ctx->fixed_rows > 0) {
+                    /* Fixed terminal size: in fullscreen, expand the grid to
+                     * fill the screen at the current font size instead of
+                     * scaling the font to fit the fixed grid.  This avoids
+                     * black bars/gaps around the content. */
+                    if (ctx->cell_w > 0 && ctx->cell_h > 0) {
+                        int nc = log_w / ctx->cell_w;
+                        int nr = log_h / ctx->cell_h;
+                        if (nc < 1) nc = 1;
+                        if (nr < 1) nr = 1;
+                        ctx->pending_cols = nc;
+                        ctx->pending_rows = nr;
+                        ctx->resize_pending = true;
+                    }
+                } else if (ctx->cell_w > 0 && ctx->cell_h > 0) {
                     int nc = log_w / ctx->cell_w;
                     int nr = log_h / ctx->cell_h;
                     if (nc < 1) nc = 1;
@@ -2354,28 +2581,32 @@ void photon_sdl_set_fixed_size(photon_sdl_t *ctx, int cols, int rows)
 }
 
 /* Enter fullscreen mode (--fullscreen command line option).
- * Saves the current windowed size and switches to fullscreen desktop mode.
- * Forces a grid recalculation from the current window size so the terminal
- * fills the display even on compositors like Gamescope where the window is
- * already fullscreen and SDL_SetWindowFullscreen is a no-op. */
+ * Saves the current windowed size and font size, then switches to fullscreen
+ * desktop mode.  Forces a grid recalculation from the current window size so
+ * the terminal fills the display even on compositors like Gamescope where
+ * SDL_SetWindowFullscreen is a no-op. */
 void photon_sdl_enter_fullscreen(photon_sdl_t *ctx)
 {
     if (!ctx) return;
     SDL_GetWindowSize(ctx->win, &ctx->pre_fullscreen_win_w,
                      &ctx->pre_fullscreen_win_h);
+    ctx->pre_fullscreen_font_pt = ctx->font_pt;
+    ctx->skip_present = true;
     SDL_SetWindowFullscreen(ctx->win, SDL_WINDOW_FULLSCREEN_DESKTOP);
-    /* Force grid recalculation from current window size */
-    int draw_w, draw_h;
-    SDL_GetRendererOutputSize(ctx->ren, &draw_w, &draw_h);
-    int log_w, log_h;
-    photon_sdl_logical_size(ctx, &log_w, &log_h);
+    /* Force grid recalculation from current window size.
+     * IMPORTANT: SDL_GetRendererOutputSize may return stale values
+     * immediately after SDL_SetWindowFullscreen on macOS Retina.
+     * Compute draw_w/draw_h from SDL_GetWindowSize and initial_scale. */
     int pts_w, pts_h;
     SDL_GetWindowSize(ctx->win, &pts_w, &pts_h);
+    int log_w, log_h;
+    photon_sdl_logical_size(ctx, &log_w, &log_h);
     ctx->win_w = log_w;
     ctx->win_h = log_h;
-    ctx->draw_w = draw_w;
-    ctx->draw_h = draw_h;
-    ctx->retina_scale = (pts_w > 0) ? (float)draw_w / (float)pts_w : 1.0f;
+    ctx->draw_w = (int)((float)pts_w * ctx->initial_scale);
+    ctx->draw_h = (int)((float)pts_h * ctx->initial_scale);
+    ctx->retina_scale = ctx->initial_scale;
+    recreate_texture(ctx);
     if (ctx->cell_w > 0 && ctx->cell_h > 0) {
         int nc = log_w / ctx->cell_w;
         int nr = log_h / ctx->cell_h;
@@ -2414,34 +2645,20 @@ bool photon_sdl_check_resize(photon_sdl_t *ctx, int *nc, int *nr)
     if (new_cols < 1) new_cols = 1;
     if (new_rows < 1) new_rows = 1;
 
+    PHOTON_DBG("check_resize: pending=%dx%d -> cols=%dx%d",
+               ctx->pending_cols, ctx->pending_rows, new_cols, new_rows);
+
     ctx->cols  = new_cols;
     ctx->rows  = new_rows;
 
-    /* Query the actual renderer output size (correct on Wayland even before
-     * the compositor has animated the window resize after fullscreen toggle). */
-    int draw_w, draw_h;
-    SDL_GetRendererOutputSize(ctx->ren, &draw_w, &draw_h);
-    int log_w, log_h;
-    photon_sdl_logical_size(ctx, &log_w, &log_h);
-    int pts_w, pts_h;
-    SDL_GetWindowSize(ctx->win, &pts_w, &pts_h);
-    ctx->retina_scale = (pts_w > 0) ? (float)draw_w / (float)pts_w : 1.0f;
-    /* On non-Retina, ensure logical >= physical. On Retina,
-     * logical < physical is expected (logical = physical / scale). */
-    if (ctx->initial_scale <= 1.0f) {
-        if (log_w < draw_w) log_w = draw_w;
-        if (log_h < draw_h) log_h = draw_h;
-    }
+    /* The WINDOWEVENT handler already updated draw_w, draw_h, win_w, win_h,
+     * and retina_scale with the correct values.  Do NOT re-query SDL here -
+     * SDL_GetRendererOutputSize/SDL_GetWindowSize return stale values during
+     * fullscreen transitions on macOS Retina. */
 
-    PHOTON_DBG("check_resize: draw=%dx%d log=%dx%d -> win=%dx%d retina=%.2f initial=%.2f",
-               draw_w, draw_h, log_w, log_h, log_w, log_h,
-               ctx->retina_scale,
-               ctx->initial_scale);
-
-    ctx->win_w = log_w;
-    ctx->win_h = log_h;
-    ctx->draw_w = draw_w;
-    ctx->draw_h = draw_h;
+    PHOTON_DBG("check_resize: draw=%dx%d win=%dx%d retina=%.2f initial=%.2f",
+               ctx->draw_w, ctx->draw_h, ctx->win_w, ctx->win_h,
+               ctx->retina_scale, ctx->initial_scale);
 
     /* Reallocate shadow buffer */
     free(ctx->shadow);
@@ -2452,19 +2669,7 @@ bool photon_sdl_check_resize(photon_sdl_t *ctx, int *nc, int *nr)
     /* Recreate render target texture for new window size.
      * Use win_w * initial_scale for Retina so the texture matches
      * the content drawing area (viewport = win_w x win_h at scale 2.0). */
-    if (ctx->texture) {
-        int tex_w = ctx->win_w;
-        int tex_h = ctx->win_h;
-        if (ctx->initial_scale > 1.0f) {
-            tex_w = (int)((float)tex_w * ctx->initial_scale);
-            tex_h = (int)((float)tex_h * ctx->initial_scale);
-        }
-        SDL_DestroyTexture(ctx->texture);
-        ctx->texture = make_texture(ctx->ren, tex_w, tex_h);
-        SDL_SetRenderTarget(ctx->ren, ctx->texture);
-        /* SDL_SetRenderTarget resets scale and viewport - fix them */
-        photon_sdl_fix_scale(ctx);
-    }
+    recreate_texture(ctx);
 
     if (nc) *nc = new_cols;
     if (nr) *nr = new_rows;
