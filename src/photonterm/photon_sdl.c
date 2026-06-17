@@ -1568,6 +1568,14 @@ void photon_sdl_present(photon_sdl_t *ctx)
 
     SDL_RenderCopy(ctx->ren, ctx->texture, NULL, NULL);
 
+    /* DEBUG: Draw a magenta border on the screen to verify blit */
+    {
+        SDL_Rect vp;
+        SDL_RenderGetViewport(ctx->ren, &vp);
+        SDL_SetRenderDrawColor(ctx->ren, 255, 0, 255, 255);
+        SDL_RenderDrawRect(ctx->ren, &vp);
+    }
+
     /* Draw selection highlight overlay on the screen backbuffer (ephemeral).
      * This avoids the overlay persisting on the render-target texture,
      * which caused highlight to remain visible after the selection was
