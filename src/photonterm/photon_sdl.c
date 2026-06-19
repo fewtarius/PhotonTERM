@@ -98,7 +98,7 @@ static void init_ansi_sgr_16(photon_rgb_t pal[256])
 
 /* ── Key queue ─────────────────────────────────────────────────────── */
 
-#define KEY_QUEUE_CAP 64
+#define KEY_QUEUE_CAP 256
 
 typedef struct {
     photon_key_t items[KEY_QUEUE_CAP];
@@ -107,7 +107,16 @@ typedef struct {
 
 static void kq_push(key_queue_t *q, photon_key_t k)
 {
-    if (q->count >= KEY_QUEUE_CAP) return;
+    static bool warned_overflow = false;
+    if (q->count >= KEY_QUEUE_CAP) {
+        if (!warned_overflow) {
+            PHOTON_DBG("kq_push: queue full (%d events), dropping key code=0x%x",
+                       q->count, k.code);
+            warned_overflow = true;
+        }
+        return;
+    }
+    warned_overflow = false;
     q->items[q->tail] = k;
     q->tail = (q->tail + 1) % KEY_QUEUE_CAP;
     q->count++;
