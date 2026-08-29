@@ -1740,7 +1740,7 @@ static void translate_sdl_event(photon_sdl_t *ctx, const SDL_Event *ev)
             return;
         /* Printable text (handles compose, dead keys, IME) */
         photon_key_t k = { .code = (unsigned char)ev->text.text[0] };
-        strncpy(k.text, ev->text.text, sizeof(k.text) - 1);
+        strlcpy(k.text, ev->text.text, sizeof(k.text));
         kq_push(&ctx->keys, k);
         return;
     }
