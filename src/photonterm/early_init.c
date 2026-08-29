@@ -6,8 +6,12 @@
  * This file covers Linux and other Unix platforms (but not Windows). */
 #if !defined(__APPLE__) && !defined(_WIN32)
 
+#define PHOTON_DEBUG_BUILD
+#include "photon_debug.h"
+
 #include <signal.h>
 #include <stdlib.h>
+#include <string.h>
 
 /* Flag set by SIGTERM handler so the main loop can exit cleanly.
  * Steam / Gamescope sends SIGTERM to quit the application. */
@@ -15,6 +19,9 @@ static volatile sig_atomic_t g_sigterm_pending = 0;
 
 int photonterm_sigterm_pending(void)
 {
+	PHOTON_DBG_ENTER();
+	PHOTON_DBG("g_sigterm_pending=%d", (int)g_sigterm_pending);
+	PHOTON_DBG_EXIT("returning %d", (int)g_sigterm_pending);
 	return g_sigterm_pending;
 }
 
@@ -36,16 +43,17 @@ __attribute__((constructor))
 static void
 photonterm_early_init(void)
 {
+	PHOTON_DBG_ENTER();
+	PHOTON_DBG("setting SDL_NO_SIGNAL_HANDLERS=1 to suppress SDL SIGINT handler");
 	setenv("SDL_NO_SIGNAL_HANDLERS", "1", 1);
-	/* Prevent Steam Runtime ld.so.preload from injecting 32-bit libraries.
-	 * Steam Deck GameMode runs a 32-bit ld.so.preload that causes
-	 * "ERROR: ld.so: wrong ELF class: ELFCLASS32" with our 64-bit binary.
-	 * Clearing LD_PRELOAD avoids this without affecting normal Steam launch. */
+	PHOTON_DBG("unsetting LD_PRELOAD to avoid Steam 32-bit ld.so.preload conflict");
 	unsetenv("LD_PRELOAD");
+	PHOTON_DBG("installing signal handlers: SIGINT=ignore, SIGTERM=handler, SIGHUP=ignore, SIGPIPE=ignore");
 	signal(SIGINT,  SIG_IGN);
 	signal(SIGTERM, sigterm_handler);
 	signal(SIGHUP,  SIG_IGN);
 	signal(SIGPIPE, SIG_IGN);
+	PHOTON_DBG_EXIT();
 }
 
 #endif /* !__APPLE__ && !_WIN32 */

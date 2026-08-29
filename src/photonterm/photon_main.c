@@ -137,8 +137,18 @@ static void switch_tab(photon_sdl_t *sdl, photon_settings_t *settings, int idx)
     active_tab = idx;
     tabs[active_tab].activity = false;
 
-    /* Switch connection */
+    /* Switch connection and notify it of the current terminal size.
+     * This is critical after a window resize: the active tab's VTE was
+     * resized in the resize handler, but background tabs' connections
+     * were never notified. Switching to them now must push the correct
+     * SIGWINCH/NAWS so the remote terminal adjusts. */
     photon_conn_set_active(tabs[active_tab].conn);
+    {
+        int nc = photon_sdl_cols(sdl);
+        int nr = photon_sdl_rows(sdl) - 1;
+        if (nr < 1) nr = 1;
+        photon_conn_resize(nc, nr);
+    }
 
     /* Reapply render mode for this tab */
     {
