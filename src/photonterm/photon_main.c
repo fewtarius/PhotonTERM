@@ -569,6 +569,27 @@ int main(int argc, char **argv)
                            settings.ttf_size_pt);
             }
 
+            /* If font size changed (via hotkey or fullscreen auto-fit),
+             * the grid dimensions may have changed.  Resize the active
+             * tab's VTE and notify the connection (SIGWINCH/NAWS). */
+            if (ntabs > 0 && tabs[active_tab].active) {
+                int nc = photon_sdl_cols(sdl);
+                int nr = photon_sdl_rows(sdl);
+                /* Reserve last row for status bar */
+                int term_rows = nr - 1;
+                if (term_rows < 1) term_rows = 1;
+                if (vte_cols(tabs[active_tab].vte) != nc ||
+                    vte_rows(tabs[active_tab].vte) != term_rows) {
+                    PHOTON_DBG("grid changed %dx%d -> %dx%d, resizing VTE",
+                               vte_cols(tabs[active_tab].vte),
+                               vte_rows(tabs[active_tab].vte),
+                               nc, term_rows);
+                    vte_resize(tabs[active_tab].vte, nc, term_rows);
+                    photon_conn_set_active(tabs[active_tab].conn);
+                    photon_conn_resize(nc, term_rows);
+                }
+            }
+
             if (state != STATE_RUNNING) continue;
 
             /* 2. Pump tab data: active tab first, then background tabs.
