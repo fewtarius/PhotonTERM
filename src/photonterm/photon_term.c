@@ -81,8 +81,8 @@ void photon_term_set_key_hook(photon_key_hook_fn fn, void *userdata)
  * Drawn on the last row of the SDL grid every frame.
  * Multi-tab: 1:name* | 2:name | W=New  (Alt-held adds more hints)
  * Single-tab: name  SSH  Alt-Z=Menu
- * The VTE is sized rows-1 when ntabs > 1 so the bar row is reserved.
- * For single-tab, the bar overlays the last VTE row (repainted next frame). */
+ * The VTE is always sized rows-1 (via resize_tabs_for_bar) so the bar
+ * row is reserved regardless of tab count. */
 
 static void draw_tab_bar(photon_sdl_t *sdl, const photon_tab_bar_t *tabbar,
                          bool alt_held)
@@ -240,6 +240,24 @@ static int key_to_bytes(const photon_key_t *k, uint8_t *out)
         if (k->code >= 'A' && k->code <= 'Z') base = k->code - 'A';
         if (base >= 0) { out[0] = (uint8_t)(base + 1); return 1; }
         if (k->code == '[') { out[0] = '\x1b'; return 1; }
+
+        /* Ctrl+punctuation: ASCII control characters produced by Ctrl+<punct> */
+        switch (k->code) {
+            case '2': case '@': out[0] = '\x00'; return 1;
+            case '3': case '#': out[0] = '\x1b'; return 1;
+            case '4': case '$': out[0] = '\x04'; return 1;
+            case '5': case '%': out[0] = '\x15'; return 1;
+            case '6': case '^': out[0] = '\x1e'; return 1;
+            case '7': case '&': out[0] = '\x07'; return 1;
+            case '8': case '*': out[0] = '\x1c'; return 1;
+            case '9': case '(': out[0] = '\x09'; return 1;
+            case '0': case ')': out[0] = '\x10'; return 1;
+            case '-': case '_': out[0] = '\x1f'; return 1;
+            case '=':           out[0] = '\x1f'; return 1;
+            case '`':           out[0] = '\x00'; return 1;
+            case ' ':           out[0] = '\x00'; return 1;
+            default: break;
+        }
     }
 
     switch (k->code) {
@@ -685,12 +703,8 @@ static void run_scrollback_viewer(vte_t *vte, photon_sdl_t *sdl)
 
 /* ── Public API: unified main loop helpers ──────────────────────────── */
 
-bool photon_term_pump_tab(vte_t *vte, photon_conn_t *conn,
-                          photon_sdl_t *sdl, bool is_active,
-                          const photon_tab_bar_t *tabbar)
+bool photon_term_pump_tab(vte_t *vte, photon_conn_t *conn, bool is_active)
 {
-    (void)sdl;
-    (void)tabbar;
 
     /* Drain data from this tab's connection into its VTE.
      * Active tab: drain all available data (user is watching it),
@@ -752,7 +766,8 @@ photon_term_result_t photon_term_handle_key(const photon_key_t *k,
     /* PageUp / scrollback */
     if ((k->code == PHOTON_KEY_PGUP && !(k->mod & ~PHOTON_MOD_SHIFT))
         || (k->code == PHOTON_KEY_UP && (k->mod & PHOTON_MOD_META))
-        || k->code == PHOTON_KEY_SCROLL_UP) {
+        || k->code == PHOTON_KEY_SCROLL_UP
+        || k->code == PHOTON_KEY_SCROLL_DOWN) {
         run_scrollback_viewer(vte, sdl);
         photon_sdl_invalidate(sdl);
         return PHOTON_TERM_CONTINUE;

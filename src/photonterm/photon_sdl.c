@@ -240,6 +240,8 @@ struct photon_sdl {
     int           cols, rows;
     int           cell_w, cell_h;
     int           font_pt;        /* TTF point size currently in use */
+    bool          font_size_changed;  /* set by hotkey; checked by main loop
+                                       * to persist to settings */
     int           win_w, win_h;
     int           draw_w, draw_h; /* physical drawable pixels (Retina 2x etc.) */
     float         retina_scale;   /* draw_w / win_w; typically 1.0 or 2.0 */
@@ -862,6 +864,16 @@ bool photon_sdl_set_font_size(photon_sdl_t *ctx, int pt,
 int photon_sdl_get_font_size(const photon_sdl_t *ctx)
 {
     return ctx ? ctx->font_pt : 0;
+}
+
+bool photon_sdl_font_size_changed(const photon_sdl_t *ctx)
+{
+    return ctx ? ctx->font_size_changed : false;
+}
+
+void photon_sdl_clear_font_size_changed(photon_sdl_t *ctx)
+{
+    if (ctx) ctx->font_size_changed = false;
 }
 
 float photon_sdl_get_retina_scale(const photon_sdl_t *ctx)
@@ -1807,12 +1819,17 @@ static void translate_sdl_event(photon_sdl_t *ctx, const SDL_Event *ev)
         return;
     }
 
-    /* Mouse wheel: scroll up enters/scrolls scrollback */
+    /* Mouse wheel: scroll up/down enters/scrolls scrollback */
     if (ev->type == SDL_MOUSEWHEEL) {
+        photon_key_t k = { .code = PHOTON_KEY_SCROLL_UP };
         if (ev->wheel.y > 0) {
-            photon_key_t k = { .code = PHOTON_KEY_SCROLL_UP };
-            kq_push(&ctx->keys, k);
+            k.code = PHOTON_KEY_SCROLL_UP;
+        } else if (ev->wheel.y < 0) {
+            k.code = PHOTON_KEY_SCROLL_DOWN;
+        } else {
+            return;
         }
+        kq_push(&ctx->keys, k);
         return;
     }
 
@@ -1897,6 +1914,8 @@ static void translate_sdl_event(photon_sdl_t *ctx, const SDL_Event *ev)
         if (new_pt > 72) new_pt = 72;
         int nc = 0, nr = 0;
         photon_sdl_set_font_size(ctx, new_pt, &nc, &nr);
+        /* Flag for the main loop to persist the new size to settings */
+        ctx->font_size_changed = true;
         return;
     }
 

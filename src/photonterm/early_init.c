@@ -11,7 +11,6 @@
 
 #include <signal.h>
 #include <stdlib.h>
-#include <string.h>
 
 /* Flag set by SIGTERM handler so the main loop can exit cleanly.
  * Steam / Gamescope sends SIGTERM to quit the application. */
