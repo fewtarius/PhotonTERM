@@ -252,6 +252,10 @@ void photon_sdl_clear_font_size_changed(photon_sdl_t *ctx);
  * logical cell coordinates: logical_x = phys_x / scale. */
 float photon_sdl_get_retina_scale(const photon_sdl_t *ctx);
 
+/* Monotonic timestamp in milliseconds. Cross-platform (wraps every ~49 days).
+ * Used by both photon_sdl (bell flash) and photon_term (render timing). */
+uint64_t now_ms(void);
+
 /* Save/restore the full 256-entry palette.  buf must be 768 bytes. */
 void photon_sdl_save_palette(const photon_sdl_t *ctx, uint8_t buf[768]);
 void photon_sdl_restore_palette(photon_sdl_t *ctx, const uint8_t buf[768]);

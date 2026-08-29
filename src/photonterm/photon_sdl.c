@@ -1378,8 +1378,8 @@ void photon_sdl_clear(photon_sdl_t *ctx)
 
 /* ── Present ────────────────────────────────────────────────────────── */
 
-/* Forward declaration: used by bell flash and cursor blink. */
-static uint64_t now_ms(void);
+/* Forward declaration: used by bell flash. Defined below. */
+uint64_t now_ms(void);
 
 void photon_sdl_present(photon_sdl_t *ctx)
 {
@@ -1427,7 +1427,7 @@ void photon_sdl_reset_glyph_budget(photon_sdl_t *ctx)
 
 /* Monotonic timestamp in milliseconds (wraps every ~49 days, same as
  * SDL_GetTicks — fine for short flash deadlines). */
-static uint64_t now_ms(void)
+uint64_t now_ms(void)
 {
     return (uint64_t)SDL_GetTicks();
 }

@@ -316,15 +316,6 @@ static int key_to_bytes(const photon_key_t *k, uint8_t *out)
     return 0;
 }
 
-/* ── Monotonic clock helper (ms) ─────────────────────────────────────── */
-
-static uint64_t now_ms(void)
-{
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000ULL + (uint64_t)ts.tv_nsec / 1000000ULL;
-}
-
 /* ── In-session Alt-Z options menu ───────────────────────────────────── */
 
 typedef enum {
