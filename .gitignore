@@ -45,3 +45,4 @@ artifacts/
 reference/
 scratch/
 ai-assisted/
+*.log

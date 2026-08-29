@@ -241,6 +241,11 @@ bool photon_sdl_set_font_size(photon_sdl_t *ctx, int pt,
 /* Return the current cell height (== effective font pt size). */
 int photon_sdl_get_font_size(const photon_sdl_t *ctx);
 
+/* Return the Retina/HiDPI scale factor (draw_w / win_w).
+ * Use this to convert SDL mouse coordinates (physical pixels) to
+ * logical cell coordinates: logical_x = phys_x / scale. */
+float photon_sdl_get_retina_scale(const photon_sdl_t *ctx);
+
 /* Save/restore the full 256-entry palette.  buf must be 768 bytes. */
 void photon_sdl_save_palette(const photon_sdl_t *ctx, uint8_t buf[768]);
 void photon_sdl_restore_palette(photon_sdl_t *ctx, const uint8_t buf[768]);

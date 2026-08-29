@@ -501,6 +501,7 @@ static void run_scrollback_viewer(vte_t *vte, photon_sdl_t *sdl)
     int rows = photon_sdl_rows(sdl);
     int cell_w = photon_sdl_cell_width(sdl);
     int cell_h = photon_sdl_cell_height(sdl);
+    float retina_scale = photon_sdl_get_retina_scale(sdl);
     int visible = rows - 1;
     if (visible < 1) visible = 1;
 
@@ -588,8 +589,8 @@ static void run_scrollback_viewer(vte_t *vte, photon_sdl_t *sdl)
         }
 
         if (ev.type == SDL_MOUSEBUTTONDOWN && ev.button.button == SDL_BUTTON_LEFT) {
-            int mc = ev.button.x / cell_w;
-            int mr = ev.button.y / cell_h;
+            int mc = (int)(ev.button.x / retina_scale / cell_w);
+            int mr = (int)(ev.button.y / retina_scale / cell_h);
             if (mc < 0) mc = 0;
             if (mr < 0) mr = 0;
             if (mc >= cols) mc = cols - 1;
@@ -600,8 +601,8 @@ static void run_scrollback_viewer(vte_t *vte, photon_sdl_t *sdl)
         }
 
         if (ev.type == SDL_MOUSEMOTION && photon_sdl_sel_active(sdl)) {
-            int mc = ev.motion.x / cell_w;
-            int mr = ev.motion.y / cell_h;
+            int mc = (int)(ev.motion.x / retina_scale / cell_w);
+            int mr = (int)(ev.motion.y / retina_scale / cell_h);
             if (mc < 0) mc = 0;
             if (mr < 0) mr = 0;
             if (mc >= cols) mc = cols - 1;
@@ -612,8 +613,8 @@ static void run_scrollback_viewer(vte_t *vte, photon_sdl_t *sdl)
         }
 
         if (ev.type == SDL_MOUSEBUTTONUP && ev.button.button == SDL_BUTTON_LEFT) {
-            int mc = ev.button.x / cell_w;
-            int mr = ev.button.y / cell_h;
+            int mc = (int)(ev.button.x / retina_scale / cell_w);
+            int mr = (int)(ev.button.y / retina_scale / cell_h);
             if (mc < 0) mc = 0;
             if (mr < 0) mr = 0;
             if (mc >= cols) mc = cols - 1;

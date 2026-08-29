@@ -253,6 +253,11 @@ struct photon_sdl {
     Uint32        cur_blink_ms;
     bool          cur_blink_on;
 
+    /* Visual bell: non-blocking flash. bell_flash_until is a monotonic
+     * deadline (ms). While now < bell_flash_until, photon_sdl_present()
+     * draws a brief white overlay on top of the rendered frame. */
+    uint64_t      bell_flash_until;
+
     /* input */
     key_queue_t   keys;
     bool          quit;
@@ -859,6 +864,11 @@ int photon_sdl_get_font_size(const photon_sdl_t *ctx)
     return ctx ? ctx->font_pt : 0;
 }
 
+float photon_sdl_get_retina_scale(const photon_sdl_t *ctx)
+{
+    return ctx ? ctx->retina_scale : 1.0f;
+}
+
 void photon_sdl_save_palette(const photon_sdl_t *ctx, uint8_t buf[768])
 {
     if (!ctx || !buf) return;
@@ -1356,6 +1366,9 @@ void photon_sdl_clear(photon_sdl_t *ctx)
 
 /* ── Present ────────────────────────────────────────────────────────── */
 
+/* Forward declaration: used by bell flash and cursor blink. */
+static uint64_t now_ms(void);
+
 void photon_sdl_present(photon_sdl_t *ctx)
 {
     if (!ctx) return;
@@ -1377,6 +1390,16 @@ void photon_sdl_present(photon_sdl_t *ctx)
         }
     }
 
+    /* Bell flash overlay: brief white tint while the flash deadline is active */
+    if (ctx->bell_flash_until > 0 && now_ms() < ctx->bell_flash_until) {
+        SDL_SetRenderDrawBlendMode(ctx->ren, SDL_BLENDMODE_BLEND);
+        SDL_SetRenderDrawColor(ctx->ren, 255, 255, 255, 100);
+        SDL_RenderFillRect(ctx->ren, NULL);
+        SDL_SetRenderDrawBlendMode(ctx->ren, SDL_BLENDMODE_NONE);
+    } else {
+        ctx->bell_flash_until = 0;
+    }
+
     SDL_RenderPresent(ctx->ren);
     /* Re-activate the render target for the next frame's draw calls */
     SDL_SetRenderTarget(ctx->ren, ctx->texture);
@@ -1388,6 +1411,13 @@ void photon_sdl_reset_glyph_budget(photon_sdl_t *ctx)
 {
     if (ctx)
         ctx->glyph_miss_count = 0;
+}
+
+/* Monotonic timestamp in milliseconds (wraps every ~49 days, same as
+ * SDL_GetTicks — fine for short flash deadlines). */
+static uint64_t now_ms(void)
+{
+    return (uint64_t)SDL_GetTicks();
 }
 
 /* ── Connecting splash ──────────────────────────────────────────────── */
@@ -1612,15 +1642,11 @@ void photon_sdl_set_title(photon_sdl_t *ctx, const char *title)
 void photon_sdl_bell_flash(photon_sdl_t *ctx)
 {
     if (!ctx || !ctx->ren) return;
-    /* Draw a brief white overlay then remove it.  This is called from the
-     * SDL main thread context (via event or callback fired from vte_input). */
-    SDL_SetRenderDrawBlendMode(ctx->ren, SDL_BLENDMODE_BLEND);
-    SDL_SetRenderDrawColor(ctx->ren, 255, 255, 255, 100);
-    SDL_RenderFillRect(ctx->ren, NULL);  /* full window */
-    photon_sdl_present(ctx);
-    SDL_Delay(80);
-    /* Invalidate shadow so next repaint redraws all cells (the white overlay
-     * contaminated the render target and must be fully overwritten). */
+    /* Set a 80ms non-blocking flash deadline. The overlay is drawn in
+     * photon_sdl_present() every frame until the deadline expires.
+     * This avoids blocking the main thread with SDL_Delay, which would
+     * stall network I/O and event processing. */
+    ctx->bell_flash_until = now_ms() + 80;
     photon_sdl_invalidate(ctx);
 }
 
@@ -1716,8 +1742,10 @@ static void translate_sdl_event(photon_sdl_t *ctx, const SDL_Event *ev)
         if (ctx->sel_have)
             photon_sdl_clear_selection(ctx);
         ctx->sel_active = true;
-        int col = ev->button.x / ctx->cell_w;
-        int row = ev->button.y / ctx->cell_h;
+        int col = (int)(ev->button.x / ctx->retina_scale / ctx->cell_w);
+        int row = (int)(ev->button.y / ctx->retina_scale / ctx->cell_h);
+        if (col < 0) col = 0;
+        if (row < 0) row = 0;
         if (col >= ctx->cols) col = ctx->cols - 1;
         if (row >= ctx->rows) row = ctx->rows - 1;
         PHOTON_DBG("mouse: start selection col=%d row=%d", col, row);
@@ -1732,8 +1760,8 @@ static void translate_sdl_event(photon_sdl_t *ctx, const SDL_Event *ev)
             return;
         }
         PHOTON_DBG("mouse: MOTION x=%d y=%d", ev->motion.x, ev->motion.y);
-        int col = ev->motion.x / ctx->cell_w;
-        int row = ev->motion.y / ctx->cell_h;
+        int col = (int)(ev->motion.x / ctx->retina_scale / ctx->cell_w);
+        int row = (int)(ev->motion.y / ctx->retina_scale / ctx->cell_h);
         if (col < 0) col = 0;
         if (row < 0) row = 0;
         if (col >= ctx->cols) col = ctx->cols - 1;
@@ -1749,8 +1777,8 @@ static void translate_sdl_event(photon_sdl_t *ctx, const SDL_Event *ev)
             ev->button.button, ev->button.x, ev->button.y, ctx->sel_active);
         if (ev->button.button == SDL_BUTTON_LEFT && ctx->sel_active) {
             ctx->sel_active = false;
-            int col = ev->button.x / ctx->cell_w;
-            int row = ev->button.y / ctx->cell_h;
+            int col = (int)(ev->button.x / ctx->retina_scale / ctx->cell_w);
+            int row = (int)(ev->button.y / ctx->retina_scale / ctx->cell_h);
             if (col < 0) col = 0;
             if (row < 0) row = 0;
             if (col >= ctx->cols) col = ctx->cols - 1;
