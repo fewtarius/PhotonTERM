@@ -454,7 +454,7 @@ static void run_terminal_mode(photon_ui_t *ui, photon_settings_t *s)
         NULL
     };
     int cur = (s->font_mode == PHOTON_FONT_TTF) ? 1 : 0;
-    int sel = photon_ui_list(ui, "Terminal Mode", opts, 2, &cur);
+    int sel = photon_ui_list(ui, "Default Terminal Mode", opts, 2, &cur);
     if (sel == 0) {
         s->font_mode = PHOTON_FONT_BITMAP;
         photon_settings_save(s);
@@ -531,7 +531,7 @@ static void run_settings(photon_ui_t *ui, photon_settings_t *s)
 
         photon_menu_field_t fields[] = {
             { "Theme",         PHOTON_MENU_FIELD_ACTION, theme_val, sizeof(theme_val), NULL, NULL, NULL },
-            { "Terminal Mode", PHOTON_MENU_FIELD_ACTION, mode_val,  sizeof(mode_val),  NULL, NULL, NULL },
+            { "Default Terminal Mode", PHOTON_MENU_FIELD_ACTION, mode_val,  sizeof(mode_val),  NULL, NULL, NULL },
             { "Font Size",     PHOTON_MENU_FIELD_ACTION, font_val,  sizeof(font_val),  NULL, NULL, NULL },
             { "Terminal Size", PHOTON_MENU_FIELD_ACTION, term_val,  sizeof(term_val),  NULL, NULL, NULL },
             { "Visual Bell",   PHOTON_MENU_FIELD_TOGGLE, NULL, 0, &s->bell_enabled, NULL, NULL },
