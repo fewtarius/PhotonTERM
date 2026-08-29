@@ -560,6 +560,15 @@ int main(int argc, char **argv)
                 if (state != STATE_RUNNING) break;
             }
 
+            /* Persist font size changes from hotkey (Alt+Plus/Minus) */
+            if (photon_sdl_font_size_changed(sdl)) {
+                settings.ttf_size_pt = photon_sdl_get_font_size(sdl);
+                photon_settings_save(&settings);
+                photon_sdl_clear_font_size_changed(sdl);
+                PHOTON_DBG("persisted font size to settings: %dpt",
+                           settings.ttf_size_pt);
+            }
+
             if (state != STATE_RUNNING) continue;
 
             /* 2. Pump tab data: active tab first, then background tabs.
@@ -571,7 +580,7 @@ int main(int argc, char **argv)
                 photon_conn_set_active(tabs[i].conn);
 
                 if (photon_term_pump_tab(tabs[i].vte, tabs[i].conn,
-                                         sdl, i == active_tab, &tabbar)) {
+                                         i == active_tab)) {
                     tabs[i].dirty = true;
                     if (i != active_tab)
                         tabs[i].activity = true;

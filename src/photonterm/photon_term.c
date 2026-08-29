@@ -1,7 +1,6 @@
 /* photon_term.c - PhotonTERM terminal session (photon_vte + photon_sdl)
  *
- * Copyright (C) 2026 fewtarius and PhotonTERM contributors,
- *                         Synthetic Autonomic Mind contributors
+ * Copyright (C) 2026 fewtarius and PhotonTERM contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
  *
  * Non-blocking pump/handle/render API for the unified main loop.
@@ -55,63 +54,6 @@ static const uint64_t FRAME_MS = 16;   /* ~60 fps render cap */
  * immediate visual feedback. */
 static bool s_force_render = false;
 
-/* ── Layout state ──────────────────────────────────────────────────── *
- * Tracks the current chrome layout so the viewport, tab bar,
- * and mouse filter all agree on pixel positions. */
-typedef struct {
-    int win_w, win_h;       /* logical window size */
-    float scale;            /* DPI scale (1.0 or 2.0 on Retina) */
-    int cell_w, cell_h;     /* cell dimensions in logical pixels */
-    int bar_h;              /* tab/status bar height in logical pixels */
-    int vp_x, vp_y;        /* VTE viewport offset */
-    int vp_w, vp_h;        /* VTE viewport size */
-    int term_cols, term_rows; /* grid dimensions */
-} term_layout_t;
-
-static term_layout_t s_layout;
-
-/* Recompute layout from current window and cell sizes. */
-static void layout_update(photon_sdl_t *sdl)
-{
-    if (!sdl) return;
-    photon_sdl_logical_size(sdl, &s_layout.win_w, &s_layout.win_h);
-    s_layout.scale = photon_sdl_get_scale(sdl);
-    s_layout.cell_w = photon_sdl_cell_width(sdl);
-    s_layout.cell_h = photon_sdl_cell_height(sdl);
-    s_layout.bar_h = s_layout.cell_h;  /* 1 row for tab/status bar */
-    s_layout.vp_x = 0;
-    s_layout.vp_y = 0;
-    s_layout.vp_w = s_layout.win_w;
-    s_layout.vp_h = s_layout.win_h - s_layout.bar_h;
-    if (s_layout.vp_h < s_layout.cell_h) s_layout.vp_h = s_layout.cell_h;
-    s_layout.term_cols = s_layout.vp_w / (s_layout.cell_w > 0 ? s_layout.cell_w : 1);
-    s_layout.term_rows = s_layout.vp_h / (s_layout.cell_h > 0 ? s_layout.cell_h : 1);
-    if (s_layout.term_cols < 20) s_layout.term_cols = 20;
-    if (s_layout.term_rows < 5) s_layout.term_rows = 5;
-}
-
-/* Mouse filter: intercept clicks in the tab bar area.
- * Returns true if the click was in the tab bar (consumed), false otherwise. */
-static bool tab_bar_mouse_filter(void *user, int x, int y, int button)
-{
-    (void)user;
-    (void)button;
-    /* Check if click is in the tab bar area (bottom of window) */
-    int bar_y = s_layout.win_h - s_layout.bar_h;
-    if (y >= bar_y) {
-        /* Click in tab bar area - consume it */
-        return true;
-    }
-    /* Click in VTE area - let PhotonTERM handle it normally */
-    return false;
-}
-
-void photon_term_install_mouse_filter(photon_sdl_t *sdl)
-{
-    if (sdl)
-        photon_sdl_set_mouse_filter(sdl, tab_bar_mouse_filter, NULL);
-}
-
 void photon_term_render_force_next(void)
 {
     s_force_render = true;
@@ -136,96 +78,95 @@ void photon_term_set_key_hook(photon_key_hook_fn fn, void *userdata)
 }
 
 /* ── Tab bar / status bar ──────────────────────────────────────────── *
- * Pixel-rendered tab bar / status line at the bottom of the window.
- * Uses photon_sdl_fill_rect_px and photon_sdl_draw_text_px for
- * Retina-perfect rendering independent of the VTE cell grid.
- *
+ * Drawn on the last row of the SDL grid every frame.
  * Multi-tab: 1:name* | 2:name | W=New  (Alt-held adds more hints)
- * Single-tab: name  proto  Alt-Z=Menu
- *
- * The VTE viewport is offset up by bar_h pixels so the bar has its
- * own space below the terminal content. */
+ * Single-tab: name  SSH  Alt-Z=Menu
+ * The VTE is always sized rows-1 (via resize_tabs_for_bar) so the bar
+ * row is reserved regardless of tab count. */
 
-static void draw_tab_bar_px(photon_sdl_t *sdl, const photon_tab_bar_t *tabbar,
-                            bool alt_held)
+static void draw_tab_bar(photon_sdl_t *sdl, const photon_tab_bar_t *tabbar,
+                         bool alt_held)
 {
     if (!sdl || !tabbar || tabbar->ntabs < 1) return;
 
-    int bar_y = s_layout.win_h - s_layout.bar_h;
-    int bar_h = s_layout.bar_h;
-    int pad = 4;  /* horizontal padding in logical pixels */
+    int cols = photon_sdl_cols(sdl);
+    int rows = photon_sdl_rows(sdl);
+    int bar_row = rows;
+    int col = 1;
 
-    /* Bar background: dark blue */
-    photon_sdl_fill_rect_px(sdl, 0, bar_y, s_layout.win_w, bar_h,
-                            16, 16, 48, 255);
-
-    /* Separator line at top of bar */
-    photon_sdl_fill_rect_px(sdl, 0, bar_y, s_layout.win_w, 1,
-                            48, 48, 96, 255);
-
-    /* Text y position: vertically centered in the bar */
-    int text_h;
-    photon_sdl_measure_text_px(sdl, "Ay", NULL, &text_h);
-    int text_y = bar_y + (bar_h - text_h) / 2;
+    /* Connection type label for the active tab */
+    const char *proto;
+    switch (tabbar->conn_type) {
+        case PHOTON_CONN_SSH:    proto = "SSH"; break;
+        case PHOTON_CONN_SHELL:  proto = "Shell"; break;
+        default:                  proto = "Telnet"; break;
+    }
 
     if (tabbar->ntabs == 1) {
         /* Single-tab status line: name  proto  Alt-Z=Menu */
-        const char *proto;
-        switch (tabbar->conn_type) {
-            case PHOTON_CONN_SSH:    proto = "SSH"; break;
-            case PHOTON_CONN_SHELL:  proto = "Shell"; break;
-            default:                  proto = "Telnet"; break;
-        }
-
         char left[96];
-        snprintf(left, sizeof(left), "%s  %s", tabbar->names[0], proto);
-        photon_sdl_draw_text_px(sdl, left, pad, text_y,
-                                200, 200, 200, 16, 16, 48);
+        snprintf(left, sizeof(left), " %s  %s ", tabbar->names[0], proto);
+        for (int j = 0; left[j] && col <= cols; j++, col++) {
+            vte_cell_t cell = { (uint32_t)(unsigned char)left[j], 7, 0, 0 };
+            photon_sdl_draw_cell(sdl, col, bar_row, &cell);
+        }
 
         /* Right-aligned hint */
         const char *hint = alt_held ? "Alt-Z=Menu  Alt-W=New" : "Alt-Z=Menu";
-        int hint_w;
-        photon_sdl_measure_text_px(sdl, hint, &hint_w, NULL);
-        photon_sdl_draw_text_px(sdl, hint,
-                                s_layout.win_w - pad - hint_w, text_y,
-                                120, 160, 200, 16, 16, 48);
+        int hlen = (int)strlen(hint);
+        int start = cols - hlen + 1;
+        if (start > col) {
+            /* Fill gap with spaces */
+            while (col < start) {
+                vte_cell_t sp = { ' ', 7, 0, 0 };
+                photon_sdl_draw_cell(sdl, col++, bar_row, &sp);
+            }
+        }
+        for (int j = 0; hint[j] && col <= cols; j++, col++) {
+            vte_cell_t cell = { (uint32_t)(unsigned char)hint[j], 3, 0, 0 };
+            photon_sdl_draw_cell(sdl, col, bar_row, &cell);
+        }
+
+        while (col <= cols) {
+            vte_cell_t blank = { ' ', 7, 0, 0 };
+            photon_sdl_draw_cell(sdl, col++, bar_row, &blank);
+        }
         return;
     }
 
-    /* Multi-tab bar: draw each tab as a pill */
-    int x = pad;
-    for (int i = 0; i < tabbar->ntabs; i++) {
-        bool is_active = (i == tabbar->active);
+    /* Multi-tab bar: 1:name* | 2:name | hints */
+    for (int i = 0; i < tabbar->ntabs && col <= cols; i++) {
         char label[72];
         snprintf(label, sizeof(label), " %d:%s%s ",
                  i + 1, tabbar->names[i],
                  tabbar->activity[i] ? "*" : "");
 
-        int label_w;
-        photon_sdl_measure_text_px(sdl, label, &label_w, NULL);
+        bool is_active = (i == tabbar->active);
+        uint8_t fg  = is_active ? 15 : 7;
+        uint8_t bg  = is_active ?  4 : 0;
+        uint8_t att = is_active ? VTE_ATTR_BOLD : 0;
 
-        if (is_active) {
-            /* Active tab: highlighted pill background */
-            photon_sdl_fill_rect_px(sdl, x, bar_y + 1, label_w, bar_h - 2,
-                                    32, 64, 128, 255);
-            photon_sdl_draw_text_px(sdl, label, x, text_y,
-                                    220, 220, 255, 32, 64, 128);
-        } else {
-            /* Inactive tab: subtle text */
-            photon_sdl_draw_text_px(sdl, label, x, text_y,
-                                    160, 160, 180, 16, 16, 48);
+        for (int j = 0; label[j] && col <= cols; j++, col++) {
+            vte_cell_t cell = { (uint32_t)(unsigned char)label[j], fg, bg, att };
+            photon_sdl_draw_cell(sdl, col, bar_row, &cell);
         }
-
-        x += label_w + 2;  /* 2px gap between tabs */
+        if (col <= cols) {
+            vte_cell_t sep = { '|', 8, 0, 0 };
+            photon_sdl_draw_cell(sdl, col++, bar_row, &sep);
+        }
     }
 
-    /* Right-aligned hints */
+    /* Hints (always visible for multi-tab; Alt-held adds more) */
     const char *hint = alt_held ? " W=New  1-9=Switch " : " Alt=Switch ";
-    int hint_w;
-    photon_sdl_measure_text_px(sdl, hint, &hint_w, NULL);
-    photon_sdl_draw_text_px(sdl, hint,
-                            s_layout.win_w - pad - hint_w, text_y,
-                            120, 160, 200, 16, 16, 48);
+    for (int j = 0; hint[j] && col <= cols; j++, col++) {
+        vte_cell_t cell = { (uint32_t)(unsigned char)hint[j], 3, 0, 0 };
+        photon_sdl_draw_cell(sdl, col, bar_row, &cell);
+    }
+
+    while (col <= cols) {
+        vte_cell_t blank = { ' ', 7, 0, 0 };
+        photon_sdl_draw_cell(sdl, col++, bar_row, &blank);
+    }
 }
 
 
@@ -299,6 +240,24 @@ static int key_to_bytes(const photon_key_t *k, uint8_t *out)
         if (k->code >= 'A' && k->code <= 'Z') base = k->code - 'A';
         if (base >= 0) { out[0] = (uint8_t)(base + 1); return 1; }
         if (k->code == '[') { out[0] = '\x1b'; return 1; }
+
+        /* Ctrl+punctuation: ASCII control characters produced by Ctrl+<punct> */
+        switch (k->code) {
+            case '2': case '@': out[0] = '\x00'; return 1;
+            case '3': case '#': out[0] = '\x1b'; return 1;
+            case '4': case '$': out[0] = '\x04'; return 1;
+            case '5': case '%': out[0] = '\x15'; return 1;
+            case '6': case '^': out[0] = '\x1e'; return 1;
+            case '7': case '&': out[0] = '\x07'; return 1;
+            case '8': case '*': out[0] = '\x1c'; return 1;
+            case '9': case '(': out[0] = '\x09'; return 1;
+            case '0': case ')': out[0] = '\x10'; return 1;
+            case '-': case '_': out[0] = '\x1f'; return 1;
+            case '=':           out[0] = '\x1f'; return 1;
+            case '`':           out[0] = '\x00'; return 1;
+            case ' ':           out[0] = '\x00'; return 1;
+            default: break;
+        }
     }
 
     switch (k->code) {
@@ -355,15 +314,6 @@ static int key_to_bytes(const photon_key_t *k, uint8_t *out)
     }
 
     return 0;
-}
-
-/* ── Monotonic clock helper (ms) ─────────────────────────────────────── */
-
-static uint64_t now_ms(void)
-{
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000ULL + (uint64_t)ts.tv_nsec / 1000000ULL;
 }
 
 /* ── In-session Alt-Z options menu ───────────────────────────────────── */
@@ -744,12 +694,8 @@ static void run_scrollback_viewer(vte_t *vte, photon_sdl_t *sdl)
 
 /* ── Public API: unified main loop helpers ──────────────────────────── */
 
-bool photon_term_pump_tab(vte_t *vte, photon_conn_t *conn,
-                          photon_sdl_t *sdl, bool is_active,
-                          const photon_tab_bar_t *tabbar)
+bool photon_term_pump_tab(vte_t *vte, photon_conn_t *conn, bool is_active)
 {
-    (void)sdl;
-    (void)tabbar;
 
     /* Drain data from this tab's connection into its VTE.
      * Active tab: drain all available data (user is watching it),
@@ -811,7 +757,8 @@ photon_term_result_t photon_term_handle_key(const photon_key_t *k,
     /* PageUp / scrollback */
     if ((k->code == PHOTON_KEY_PGUP && !(k->mod & ~PHOTON_MOD_SHIFT))
         || (k->code == PHOTON_KEY_UP && (k->mod & PHOTON_MOD_META))
-        || k->code == PHOTON_KEY_SCROLL_UP) {
+        || k->code == PHOTON_KEY_SCROLL_UP
+        || k->code == PHOTON_KEY_SCROLL_DOWN) {
         run_scrollback_viewer(vte, sdl);
         photon_sdl_invalidate(sdl);
         return PHOTON_TERM_CONTINUE;
@@ -945,61 +892,13 @@ void photon_term_render(photon_sdl_t *sdl, vte_t *vte,
 
     if (dirty || sel_live || s_force_render || (t - s_last_render) >= FRAME_MS) {
         s_force_render = false;
-
-        /* Update layout. Use externally-set viewport if the caller
-         * (e.g. MIRA) has already configured one; otherwise compute
-         * the default viewport from the window size. */
-        layout_update(sdl);
-        {
-            int ext_vp_x, ext_vp_y, ext_vp_w, ext_vp_h;
-            photon_sdl_get_viewport(sdl, &ext_vp_x, &ext_vp_y,
-                                    &ext_vp_w, &ext_vp_h);
-            if (ext_vp_w > 0 && ext_vp_h > 0) {
-                /* Caller has set a custom viewport - use it but update
-                 * grid dimensions from the current window size */
-                s_layout.vp_x = ext_vp_x;
-                s_layout.vp_y = ext_vp_y;
-                s_layout.vp_w = ext_vp_w;
-                s_layout.vp_h = ext_vp_h;
-                s_layout.term_cols = ext_vp_w /
-                    (s_layout.cell_w > 0 ? s_layout.cell_w : 1);
-                s_layout.term_rows = ext_vp_h /
-                    (s_layout.cell_h > 0 ? s_layout.cell_h : 1);
-                if (s_layout.term_cols < 20) s_layout.term_cols = 20;
-                if (s_layout.term_rows < 5) s_layout.term_rows = 5;
-            }
-            photon_sdl_set_viewport(sdl, s_layout.vp_x, s_layout.vp_y,
-                                    s_layout.vp_w, s_layout.vp_h);
-        }
-
         photon_sdl_repaint(sdl, vte);
-
-        /* Reset viewport for chrome drawing (pixel coordinates) */
-        photon_sdl_set_viewport(sdl, 0, 0, 0, 0);
-
-        /* Fill gap between VTE content and tab bar with background color */
-        {
-            int grid_h = s_layout.term_rows * s_layout.cell_h;
-            int gap_y = s_layout.vp_y + grid_h;
-            int gap_h = s_layout.vp_h - grid_h;
-            if (gap_h > 0)
-                photon_sdl_fill_rect_px(sdl, 0, gap_y,
-                                        s_layout.win_w, gap_h,
-                                        0, 0, 0, 255);
-        }
-
-        /* Draw tab bar / status line using pixel rendering */
+        /* Draw tab bar / status line on the last row every frame */
         if (tabbar && tabbar->ntabs >= 1)
-            draw_tab_bar_px(sdl, tabbar, alt_held);
-
+            draw_tab_bar(sdl, tabbar, alt_held);
         alt_overlay_active = alt_held;
         if (s_render_overlay_fn)
             s_render_overlay_fn(sdl, vte, s_render_overlay_userdata);
-
-        /* Restore viewport for VTE rendering on next frame */
-        photon_sdl_set_viewport(sdl, s_layout.vp_x, s_layout.vp_y,
-                                s_layout.vp_w, s_layout.vp_h);
-
         photon_sdl_present(sdl);
         s_last_render = t;
     }

@@ -68,7 +68,8 @@ typedef enum {
 #define PHOTON_KEY_QUIT     278     /* window close button */
 #define PHOTON_KEY_COPY_SEL 279     /* mouse selection complete - copy to clipboard */
 #define PHOTON_KEY_PASTE    280     /* middle/right click - paste from clipboard */
-#define PHOTON_KEY_SCROLL_UP 281    /* mouse wheel up - enter/scroll scrollback */
+#define PHOTON_KEY_SCROLL_UP   281    /* mouse wheel up - enter/scroll scrollback */
+#define PHOTON_KEY_SCROLL_DOWN 282    /* mouse wheel down - scroll scrollback */
 
 typedef struct {
     int     code;       /* ASCII 1-127, or PHOTON_KEY_*, or 0 for no event */
@@ -246,6 +247,11 @@ bool photon_sdl_set_font_size(photon_sdl_t *ctx, int pt,
 
 /* Return the current cell height (== effective font pt size). */
 int photon_sdl_get_font_size(const photon_sdl_t *ctx);
+
+/* Font size hotkey (Alt+Plus/Minus) sets this flag.  The main loop checks it
+ * to persist the new size to settings. */
+bool photon_sdl_font_size_changed(const photon_sdl_t *ctx);
+void photon_sdl_clear_font_size_changed(photon_sdl_t *ctx);
 
 /* Return the Retina/HiDPI scale factor (draw_w / win_w).
  * Use this to convert SDL mouse coordinates (physical pixels) to

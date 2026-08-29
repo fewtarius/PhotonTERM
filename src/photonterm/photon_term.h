@@ -83,9 +83,7 @@ void photon_term_install_mouse_filter(photon_sdl_t *sdl);
  * For background tabs (is_active=false), only processes data (no rendering).
  * For active tab, also handles rendering if dirty.
  * Returns true if data was processed. */
-bool photon_term_pump_tab(vte_t *vte, photon_conn_t *conn,
-                          photon_sdl_t *sdl, bool is_active,
-                          const photon_tab_bar_t *tabbar);
+bool photon_term_pump_tab(vte_t *vte, photon_conn_t *conn, bool is_active);
 
 /* Handle a key event for the active tab.
  * Returns an action code the main loop should act on.
