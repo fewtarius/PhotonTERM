@@ -25,13 +25,22 @@ const photon_theme_t *photon_menu_theme(void)
 
 /* ── Terminal dimensions ─────────────────────────────────────────────── */
 
+/* Grid dimensions: prefer SDL (live, reflects fullscreen and pending resizes)
+ * over VTE.  This ensures menu dialogs fill the actual window area in both
+ * windowed and fullscreen mode, matching the dimensions used by
+ * photon_ui_save_screen() / photon_ui_restore_screen(). */
 int photon_menu_cols(photon_ui_t *ui)
 {
+	photon_sdl_t *sdl = photon_ui_sdl(ui);
+	if (sdl && photon_sdl_cols(sdl) > 0)
+		return photon_sdl_cols(sdl);
 	return vte_cols(photon_ui_vte(ui));
 }
-
 int photon_menu_rows(photon_ui_t *ui)
 {
+	photon_sdl_t *sdl = photon_ui_sdl(ui);
+	if (sdl && photon_sdl_rows(sdl) > 0)
+		return photon_sdl_rows(sdl);
 	return vte_rows(photon_ui_vte(ui));
 }
 

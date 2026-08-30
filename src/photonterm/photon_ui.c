@@ -84,19 +84,7 @@ void photon_ui_set_colors(photon_ui_t *ui, const photon_ui_colors_t *c)
     if (ui && c) ui->colors = *c;
 }
 
-/* ── Grid dimension helpers ────────────────────────────────────────────── */
 
-/* Grid dimensions: prefer SDL (live, reflects fullscreen) over VTE */
-static int ui_grid_cols(const photon_ui_t *ui)
-{
-    return (ui->sdl && photon_sdl_cols(ui->sdl) > 0)
-           ? photon_sdl_cols(ui->sdl) : vte_cols(ui->vte);
-}
-static int ui_grid_rows(const photon_ui_t *ui)
-{
-    return (ui->sdl && photon_sdl_rows(ui->sdl) > 0)
-           ? photon_sdl_rows(ui->sdl) : vte_rows(ui->vte);
-}
 
 /* ── Screen save / restore ─────────────────────────────────────────────── */
 
@@ -130,8 +118,8 @@ photon_ui_screen_t *photon_ui_save_screen(photon_ui_t *ui)
 void photon_ui_restore_screen(photon_ui_t *ui, photon_ui_screen_t *s)
 {
     if (!ui || !s) return;
-    int cols = s->cols < ui_grid_cols(ui) ? s->cols : ui_grid_cols(ui);
-    int rows = s->rows < ui_grid_rows(ui) ? s->rows : ui_grid_rows(ui);
+    int cols = s->cols < photon_menu_cols(ui) ? s->cols : photon_menu_cols(ui);
+    int rows = s->rows < photon_menu_rows(ui) ? s->rows : photon_menu_rows(ui);
     for (int r = 1; r <= rows; r++) {
         for (int c = 1; c <= cols; c++) {
             const vte_cell_t *cell = &s->cells[(r-1)*s->cols + (c-1)];
@@ -1045,10 +1033,10 @@ void photon_ui_pop(photon_ui_t *ui, const char *msg)
     if (msg_len > TOAST_MAX - 1) msg_len = TOAST_MAX - 1;
 
     int toast_w = msg_len + 6;  /* "[ msg ]" */
-    if (toast_w > ui_grid_cols(ui)) toast_w = ui_grid_cols(ui);
+    if (toast_w > photon_menu_cols(ui)) toast_w = photon_menu_cols(ui);
 
-    int tcols = ui_grid_cols(ui);
-    int trows = ui_grid_rows(ui);
+    int tcols = photon_menu_cols(ui);
+    int trows = photon_menu_rows(ui);
 
     int col1 = (tcols - toast_w) / 2 + 1;
     int row1 = trows / 2;
