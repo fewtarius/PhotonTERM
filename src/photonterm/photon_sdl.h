@@ -15,7 +15,6 @@
 
 #include "photon_vte.h"
 
-#include <SDL2/SDL.h>
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -226,11 +225,6 @@ void photon_sdl_load_ansi_palette(photon_sdl_t *ctx);
 /* Deprecated alias for photon_sdl_load_ansi_palette(). */
 void photon_sdl_load_cga_palette(photon_sdl_t *ctx);
 
-/* Get the RGB values for a palette index (0-255).
- * Returns the current palette colour for the given index. */
-void photon_sdl_get_palette_rgb(const photon_sdl_t *ctx, int index,
-                                uint8_t *r, uint8_t *g, uint8_t *b);
-
 /* Set Unicode/TTF rendering mode.  When enabled, the CP437 bitmap atlas is
  * skipped and all glyphs are rendered via SDL2_ttf (full Unicode coverage).
  * When disabled (default), the CP437 atlas is used for ASCII/CP437 chars. */
@@ -302,89 +296,6 @@ void photon_sdl_set_title(photon_sdl_t *ctx, const char *title);
 /* Visual bell: briefly flash the window (white overlay, ~100ms).
  * Safe to call from any thread. */
 void photon_sdl_bell_flash(photon_sdl_t *ctx);
-
-/* ── Viewport (VTE grid offset for chrome) ──────────────────────────── */
-
-/* Set the viewport offset and size for the VTE cell grid.
- * When a viewport is set, all cell rendering is offset by (vp_x, vp_y)
- * pixels, and the VTE grid occupies a (vp_w, vp_h) pixel rectangle.
- * This allows host apps to render chrome (title bar, sidebar, status bar)
- * outside the VTE area.  Pass (0, 0, 0, 0) to reset to full-window. */
-void photon_sdl_set_viewport(photon_sdl_t *ctx, int vp_x, int vp_y,
-                             int vp_w, int vp_h);
-
-/* Get the current viewport offset. */
-void photon_sdl_get_viewport(const photon_sdl_t *ctx,
-                             int *vp_x, int *vp_y,
-                             int *vp_w, int *vp_h);
-
-/* Switch the render target back to the persistent render-target texture.
- * Use this when the caller has temporarily switched the target to the
- * screen (e.g. before photon_sdl_check_resize to read the physical
- * output size) and needs to restore drawing to the texture without
- * clearing or presenting.  This is lighter than photon_sdl_clear(),
- * which also clears the texture and presents a black frame. */
-void photon_sdl_use_texture(photon_sdl_t *ctx);
-
-/* ── Pixel-level drawing (for chrome elements) ──────────────────────── */
-
-/* Fill a pixel rectangle with a solid colour (RGBA). */
-void photon_sdl_fill_rect_px(photon_sdl_t *ctx,
-                              int x, int y, int w, int h,
-                              uint8_t r, uint8_t g, uint8_t b, uint8_t a);
-
-/* Draw a 1px border around a pixel rectangle (RGBA). */
-void photon_sdl_draw_rect_border_px(photon_sdl_t *ctx,
-                                     int x, int y, int w, int h,
-                                     uint8_t r, uint8_t g, uint8_t b, uint8_t a);
-
-/* Render a UTF-8 string at pixel coordinates using the current TTF font.
- * Returns the pixel width of the rendered text, or -1 on error. */
-int photon_sdl_draw_text_px(photon_sdl_t *ctx,
-                             const char *utf8_str,
-                             int x, int y,
-                             uint8_t fg_r, uint8_t fg_g, uint8_t fg_b,
-                             uint8_t bg_r, uint8_t bg_g, uint8_t bg_b);
-
-/* Measure the pixel width and height of a UTF-8 string using the current
- * TTF font without rendering it.  Returns 0 on success, -1 on error. */
-int photon_sdl_measure_text_px(photon_sdl_t *ctx,
-                                const char *utf8_str,
-                                int *width, int *height);
-
-/* Get the window size in pixels (logical, not physical). */
-void photon_sdl_get_window_size(photon_sdl_t *ctx, int *w, int *h);
-
-/* Get the rendering logical size (corrects for fullscreen Retina). */
-void photon_sdl_logical_size(photon_sdl_t *ctx, int *w, int *h);
-
-/* Get the underlying SDL_Window handle. */
-SDL_Window *photon_sdl_get_window(photon_sdl_t *ctx);
-
-/* Override the terminal grid dimensions.  Resizes the shadow
- * buffer to match.  Used by MIRA to force a specific cell count
- * after layout changes. */
-void photon_sdl_set_grid(photon_sdl_t *ctx, int cols, int rows);
-
-/* Get the DPI scaling factor (1.0 for standard, 2.0 for Retina/HiDPI). */
-float photon_sdl_get_scale(const photon_sdl_t *ctx);
-
-/* ── Mouse event filter ─────────────────────────────────────────────── */
-
-/* Callback type for intercepting mouse events before PhotonTERM processes
- * them for text selection.  Return true if the event was consumed (chrome
- * click) and should NOT be forwarded to the selection handler.  Return
- * false to let PhotonTERM handle it normally.
- * x and y are window pixel coordinates (not cell coordinates). */
-typedef bool (*photon_sdl_mouse_filter_t)(void *user, int x, int y, int button);
-
-/* Install a mouse event filter.  When set, every mouse button down event
- * is first passed to the filter.  If the filter returns true, the event
- * is consumed (no text selection starts).  If false, normal selection
- * handling proceeds.  Pass NULL to remove the filter. */
-void photon_sdl_set_mouse_filter(photon_sdl_t *ctx,
-                                  photon_sdl_mouse_filter_t filter,
-                                  void *user);
 
 #ifdef __cplusplus
 }

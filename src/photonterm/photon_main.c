@@ -80,7 +80,7 @@ static bool ssh_password_prompt(const char *prompt, char *out, size_t outsz,
 bool quitting = false;
 
 /* Version string - updated by scripts/release.sh */
-const char *photonterm_version = "PhotonTERM 20260619.1";
+const char *photonterm_version = "PhotonTERM 20260830.1";
 
 /* ── Signal handling ─────────────────────────────────────────────────── */
 
@@ -382,9 +382,6 @@ int main(int argc, char **argv)
         return 1;
     }
     photon_ui_global = ui;
-
-    /* Install tab bar mouse filter to intercept clicks in chrome area */
-    photon_term_install_mouse_filter(sdl);
     photon_conn_set_ssh_prompt(ssh_password_prompt, NULL);
     PHOTON_DBG("UI context created");
 
@@ -421,30 +418,6 @@ int main(int argc, char **argv)
             PHOTON_DBG("SIGTERM received, shutting down");
             state = STATE_SHUTDOWN;
             break;
-        }
-
-        /* Always process resize events, regardless of app state.
-         * This ensures the SDL context dimensions are updated for
-         * fullscreen transitions and window resizing, even when
-         * the BBS directory is showing. */
-        {
-            int nc = 0, nr = 0;
-            if (photon_sdl_check_resize(sdl, &nc, &nr)) {
-                if (ntabs > 0 && tabs[active_tab].active) {
-                    /* Reserve one row for status bar */
-                    int term_rows = nr - 1;
-                    if (term_rows < 1) term_rows = 1;
-                    for (int i = 0; i < ntabs; i++) {
-                        if (tabs[i].active)
-                            vte_resize(tabs[i].vte, nc, term_rows);
-                    }
-                    /* Notify the active connection of the new size */
-                    photon_conn_set_active(tabs[active_tab].conn);
-                    photon_conn_resize(nc, term_rows);
-                }
-                /* Force immediate render after resize */
-                photon_term_render_force_next();
-            }
         }
 
         if (state == STATE_DIRECTORY) {
@@ -639,11 +612,33 @@ int main(int argc, char **argv)
 
             if (state != STATE_RUNNING) continue;
 
-            /* 3. Render active tab (gated by frame timer). */
+            /* 3. Render active tab (gated by frame timer).
+             * photon_term_render() checks its own 16ms frame timer and
+             * skips the render if it's too soon.  This means the main
+             * loop spins at ~1ms ticks for events/data but only renders
+             * at ~60fps, avoiding GPU contention with LLM inference.
+             * Window expose events force an immediate render. */
             if (photon_sdl_take_expose(sdl))
                 photon_term_render_force_next();
 
             if (ntabs > 0 && tabs[active_tab].active) {
+                /* Check for window resize (fullscreen toggle, user drag) */
+                int nc = 0, nr = 0;
+                if (photon_sdl_check_resize(sdl, &nc, &nr)) {
+                    /* Reserve one row for status bar */
+                    int term_rows = nr - 1;
+                    if (term_rows < 1) term_rows = 1;
+                    for (int i = 0; i < ntabs; i++) {
+                        if (tabs[i].active)
+                            vte_resize(tabs[i].vte, nc, term_rows);
+                    }
+                    /* Notify the active connection of the new size */
+                    photon_conn_set_active(tabs[active_tab].conn);
+                    photon_conn_resize(nc, term_rows);
+                    /* Force immediate render after resize */
+                    photon_term_render_force_next();
+                }
+
                 tabbar = build_tab_bar();
                 photon_conn_set_active(tabs[active_tab].conn);
                 photon_term_render(sdl, tabs[active_tab].vte, &tabbar,
