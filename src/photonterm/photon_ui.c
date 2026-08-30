@@ -35,7 +35,6 @@
 
 struct photon_ui_screen {
     int        cols, rows;
-    int        cell_w, cell_h;  /* cell dimensions at save time */
     vte_cell_t cells[];   /* flexible array: cols*rows */
 };
 
@@ -85,19 +84,7 @@ void photon_ui_set_colors(photon_ui_t *ui, const photon_ui_colors_t *c)
     if (ui && c) ui->colors = *c;
 }
 
-/* ── Grid dimension helpers ────────────────────────────────────────────── */
 
-/* Grid dimensions: prefer SDL (live, reflects fullscreen) over VTE */
-static int ui_grid_cols(const photon_ui_t *ui)
-{
-    return (ui->sdl && photon_sdl_cols(ui->sdl) > 0)
-           ? photon_sdl_cols(ui->sdl) : vte_cols(ui->vte);
-}
-static int ui_grid_rows(const photon_ui_t *ui)
-{
-    return (ui->sdl && photon_sdl_rows(ui->sdl) > 0)
-           ? photon_sdl_rows(ui->sdl) : vte_rows(ui->vte);
-}
 
 /* ── Screen save / restore ─────────────────────────────────────────────── */
 
@@ -111,8 +98,6 @@ photon_ui_screen_t *photon_ui_save_screen(photon_ui_t *ui)
     if (!s) return NULL;
     s->cols = cols;
     s->rows = rows;
-    s->cell_w = photon_sdl_cell_width(ui->sdl);
-    s->cell_h = photon_sdl_cell_height(ui->sdl);
 
     /* Bulk copy from shadow buffer (fast path) */
     const vte_cell_t *shadow = photon_sdl_shadow_ptr(ui->sdl);
@@ -133,17 +118,8 @@ photon_ui_screen_t *photon_ui_save_screen(photon_ui_t *ui)
 void photon_ui_restore_screen(photon_ui_t *ui, photon_ui_screen_t *s)
 {
     if (!ui || !s) return;
-    /* If grid or cell dimensions changed (e.g. font resize), clear and skip
-     * restore to avoid drawing stale content at wrong scale */
-    if (s->cols != ui_grid_cols(ui) || s->rows != ui_grid_rows(ui) ||
-        s->cell_w != photon_sdl_cell_width(ui->sdl) ||
-        s->cell_h != photon_sdl_cell_height(ui->sdl)) {
-        photon_sdl_clear(ui->sdl);
-        photon_sdl_present(ui->sdl);
-        return;
-    }
-    int cols = s->cols < ui_grid_cols(ui) ? s->cols : ui_grid_cols(ui);
-    int rows = s->rows < ui_grid_rows(ui) ? s->rows : ui_grid_rows(ui);
+    int cols = s->cols < photon_menu_cols(ui) ? s->cols : photon_menu_cols(ui);
+    int rows = s->rows < photon_menu_rows(ui) ? s->rows : photon_menu_rows(ui);
     for (int r = 1; r <= rows; r++) {
         for (int c = 1; c <= cols; c++) {
             const vte_cell_t *cell = &s->cells[(r-1)*s->cols + (c-1)];
@@ -224,6 +200,15 @@ int photon_ui_list(photon_ui_t *ui,
     if (n_items == 0) return -1;
 
     const photon_theme_t *t = photon_menu_theme();
+    int W = photon_menu_cols(ui);
+    int H = photon_menu_rows(ui);
+
+    /* Layout: title bar (row 1), items (rows 2..H-2), hints (row H-1), status (row H) */
+    int list_top = 2;
+    int hint_row = H - 1;
+    int list_bot = hint_row - 1;
+    int vis_rows = list_bot - list_top + 1;
+    if (vis_rows < 1) vis_rows = 1;
 
     /* Save screen */
     photon_ui_screen_t *saved = photon_ui_save_screen(ui);
@@ -241,15 +226,6 @@ int photon_ui_list(photon_ui_t *ui,
     bool redraw = true;
 
     for (;;) {
-        /* Recompute layout on each redraw so font resize takes effect */
-        int W = photon_menu_cols(ui);
-        int H = photon_menu_rows(ui);
-        int list_top = 2;
-        int hint_row = H - 1;
-        int list_bot = hint_row - 1;
-        int vis_rows = list_bot - list_top + 1;
-        if (vis_rows < 1) vis_rows = 1;
-
         /* Adjust scroll so sel is visible */
         if (sel < scroll) scroll = sel;
         if (sel >= scroll + vis_rows) scroll = sel - vis_rows + 1;
@@ -898,9 +874,19 @@ void photon_ui_showbuf(photon_ui_t *ui,
     if (!ui || !text) return;
 
     const photon_theme_t *t = photon_menu_theme();
+    int W = photon_menu_cols(ui);
+    int H = photon_menu_rows(ui);
 
     char **lines = NULL;
     int   n_lines = split_lines(text, &lines);
+
+    /* Layout: title bar (row 1), text (rows 2..H-2), hints (row H-1), status (row H) */
+    int text_top = 2;
+    int hint_row = H - 1;
+    int text_bot = hint_row - 1;
+    int vis_rows = text_bot - text_top + 1;
+    if (vis_rows < 1) vis_rows = 1;
+    int inner_w = W - 2;
 
     photon_ui_screen_t *saved = photon_ui_save_screen(ui);
 
@@ -912,16 +898,6 @@ void photon_ui_showbuf(photon_ui_t *ui,
     bool redraw = true;
 
     for (;;) {
-        /* Recompute layout on each redraw so font resize takes effect */
-        int W = photon_menu_cols(ui);
-        int H = photon_menu_rows(ui);
-        int text_top = 2;
-        int hint_row = H - 1;
-        int text_bot = hint_row - 1;
-        int vis_rows = text_bot - text_top + 1;
-        if (vis_rows < 1) vis_rows = 1;
-        int inner_w = W - 2;
-
         if (redraw) {
         /* Full-screen layout */
         photon_menu_fill_rect(ui, 1, 1, W, H, PHOTON_MENU_A_NORM(t));
@@ -1057,10 +1033,10 @@ void photon_ui_pop(photon_ui_t *ui, const char *msg)
     if (msg_len > TOAST_MAX - 1) msg_len = TOAST_MAX - 1;
 
     int toast_w = msg_len + 6;  /* "[ msg ]" */
-    if (toast_w > ui_grid_cols(ui)) toast_w = ui_grid_cols(ui);
+    if (toast_w > photon_menu_cols(ui)) toast_w = photon_menu_cols(ui);
 
-    int tcols = ui_grid_cols(ui);
-    int trows = ui_grid_rows(ui);
+    int tcols = photon_menu_cols(ui);
+    int trows = photon_menu_rows(ui);
 
     int col1 = (tcols - toast_w) / 2 + 1;
     int row1 = trows / 2;

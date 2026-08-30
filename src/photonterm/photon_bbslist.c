@@ -160,8 +160,8 @@ static const char *conn_type_label(photon_conn_type_t t)
 #define DIR_COL_SEP   1   /* space after name */
 
 /* ── Terminal size helpers ──────────────────────────────────────────── */
-static int tcols(photon_ui_t *ui) { return vte_cols(photon_ui_vte(ui)); }
-static int trows(photon_ui_t *ui) { return vte_rows(photon_ui_vte(ui)); }
+static int tcols(photon_ui_t *ui) { return photon_menu_cols(ui); }
+static int trows(photon_ui_t *ui) { return photon_menu_rows(ui); }
 
 /* ── Status bar ─────────────────────────────────────────────────────── */
 static void draw_statusbar(photon_ui_t *ui, bool connected, const char *bbs_name)
@@ -1021,7 +1021,18 @@ static photon_bbs_t *run_directory(photon_ui_t *ui, photon_settings_t *s,
             break;
 
         case '\x1b':
-            done = true;
+            if (reselect) {
+                /* Returning from a session — ESC goes to the exit menu
+                 * (quit confirmation), not back to the splash screen. */
+                PHOTON_DBG("ESC from directory with reselect - showing quit confirmation");
+                if (photon_ui_confirm(ui, "Quit PhotonTERM?")) {
+                    if (quit_out) *quit_out = true;
+                    done = true;
+                }
+            } else {
+                PHOTON_DBG("ESC from directory without reselect - returning to splash");
+                done = true;
+            }
             break;
 
         case 'Q': case 'q':
@@ -1068,6 +1079,7 @@ photon_bbs_t *photon_bbslist_run(photon_ui_t *ui, bool start_in_directory,
     bool done = false;
     bool quit = false;
     bool redraw_splash = true;
+    const photon_bbs_t *session_reselect = reselect;
 
     /* Splash loop */
     while (!done) {
@@ -1080,7 +1092,10 @@ photon_bbs_t *photon_bbslist_run(photon_ui_t *ui, bool start_in_directory,
             } else if (quit) {
                 done = true;
             } else {
-                /* User cancelled the directory - show splash from here on */
+                /* User cancelled the directory - show splash from here on.
+                 * Drop session_reselect so a later directory open (from
+                 * the splash) does not route ESC to the exit menu. */
+                session_reselect = NULL;
                 start_in_directory = false;
                 redraw_splash = true;
             }
@@ -1141,8 +1156,10 @@ photon_bbs_t *photon_bbslist_run(photon_ui_t *ui, bool start_in_directory,
                 break;
 
             default:
-                /* Any other key - open directory */
-                result = run_directory(ui, &s, NULL, &quit);
+                /* Any other key - open directory.
+                 * Pass session_reselect so the entry is pre-selected and
+                 * ESC routes to the exit menu when returning from a session. */
+                result = run_directory(ui, &s, session_reselect, &quit);
                 if (result || quit)
                     done = true;
                 else
