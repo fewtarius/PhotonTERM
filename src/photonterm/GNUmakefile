@@ -169,7 +169,7 @@ else
 endif
 
 all: $(BINARY)
-ifdef ifeq($(os),darwin)
+ifeq ($(os),darwin)
 all: $(APPBUNDLE)
 endif
 
