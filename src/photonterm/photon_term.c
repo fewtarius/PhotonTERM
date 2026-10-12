@@ -362,9 +362,9 @@ static session_menu_result_t show_session_menu(photon_ui_t *ui,
     };
     int nitems = 5;
 
-    char title[128];
-    snprintf(title, sizeof(title), "Session: %s",
-             bbs && bbs->name[0] ? bbs->name : "Connected");
+    char title[PHOTON_BBS_NAME_MAX + 16];
+    strlcpy(title, "Session: ", sizeof(title));
+    strlcat(title, bbs && bbs->name[0] ? bbs->name : "Connected", sizeof(title));
 
     static const photon_hint_t hints[] = {
         { "Return", " Select  " },

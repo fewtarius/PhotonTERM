@@ -283,10 +283,12 @@ bool photon_settings_load(photon_settings_t *s)
 bool photon_settings_save(const photon_settings_t *s)
 {
     char path[PATH_MAX];
-    snprintf(path, sizeof(path), "%s/settings.ini", photon_store_config_dir());
+    strlcpy(path, photon_store_config_dir(), sizeof(path));
+    strlcat(path, "/settings.ini", sizeof(path));
 
     char tmp[PATH_MAX];
-    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    strlcpy(tmp, path, sizeof(tmp));
+    strlcat(tmp, ".tmp", sizeof(tmp));
     FILE *f = fopen(tmp, "w");
     if (!f) return false;
 

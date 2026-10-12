@@ -108,7 +108,8 @@ static void strip_nl(char *s)
 int photon_store_load(photon_bbs_t *entries, int max, char *path_out, size_t path_max)
 {
     char path[PATH_MAX];
-    snprintf(path, sizeof(path), "%s/bbslist.ini", photon_store_config_dir());
+    strlcpy(path, photon_store_config_dir(), sizeof(path));
+    strlcat(path, "/bbslist.ini", sizeof(path));
     if (path_out) strlcpy(path_out, path, path_max);
 
     FILE *f = fopen(path, "r");
@@ -178,11 +179,13 @@ int photon_store_load(photon_bbs_t *entries, int max, char *path_out, size_t pat
 bool photon_store_save(const photon_bbs_t *entries, int count)
 {
     char path[PATH_MAX];
-    snprintf(path, sizeof(path), "%s/bbslist.ini", photon_store_config_dir());
+    strlcpy(path, photon_store_config_dir(), sizeof(path));
+    strlcat(path, "/bbslist.ini", sizeof(path));
 
     /* Write to a temp file first, then rename */
     char tmp[PATH_MAX];
-    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    strlcpy(tmp, path, sizeof(tmp));
+    strlcat(tmp, ".tmp", sizeof(tmp));
 
     FILE *f = fopen(tmp, "w");
     if (!f) return false;

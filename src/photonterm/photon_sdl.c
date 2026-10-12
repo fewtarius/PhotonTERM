@@ -359,7 +359,9 @@ static char *walk_up_find(const char *start_dir, const char *suffix, int max_lev
     strlcpy(dir, start_dir, sizeof(dir));
     for (int i = 0; i <= max_levels; i++) {
         char candidate[4096];
-        snprintf(candidate, sizeof(candidate), "%s/%s", dir, suffix);
+        strlcpy(candidate, dir, sizeof(candidate));
+        strlcat(candidate, "/", sizeof(candidate));
+        strlcat(candidate, suffix, sizeof(candidate));
         if (font_accessible(candidate)) return strdup(candidate);
         char *last = strrchr(dir, '/');
         if (!last || last == dir) break;

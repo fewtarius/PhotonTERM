@@ -198,7 +198,8 @@ static void draw_entry_statusbar(photon_ui_t *ui, const photon_bbs_t *bbs)
     /* Left: comment (if any) */
     if (bbs->comment[0]) {
         char lbuf[128];
-        snprintf(lbuf, sizeof(lbuf), " %s", bbs->comment);
+        lbuf[0] = ' ';
+        strlcpy(lbuf + 1, bbs->comment, sizeof(lbuf) - 1);
         put_str(ui, 1, H, lbuf, a);
     }
 
@@ -650,19 +651,19 @@ static int build_edit_menu(const photon_bbs_t *b, char rows[][72],
     bool is_shell = (b->conn_type == PHOTON_CONN_SHELL);
     bool is_ssh   = (b->conn_type == PHOTON_CONN_SSH);
 
-    snprintf(rows[EDIT_FIELD_NAME],    72, "Name         : %s", b->name);
+    snprintf(rows[EDIT_FIELD_NAME],    72, "Name         : %.56s", b->name);
     if (is_shell)
-        snprintf(rows[EDIT_FIELD_ADDR], 72, "Command      : %s",
+        snprintf(rows[EDIT_FIELD_ADDR], 72, "Command      : %.56s",
                  b->addr[0] ? b->addr : "(default shell)");
     else
-        snprintf(rows[EDIT_FIELD_ADDR], 72, "Address      : %s", b->addr);
+        snprintf(rows[EDIT_FIELD_ADDR], 72, "Address      : %.56s", b->addr);
     snprintf(rows[EDIT_FIELD_TYPE],    72, "Type         : %s", conn_names[ct]);
     snprintf(rows[EDIT_FIELD_PORT],    72, "Port         : %u", (unsigned)b->port);
-    snprintf(rows[EDIT_FIELD_USER],    72, "Username     : %s", b->user);
+    snprintf(rows[EDIT_FIELD_USER],    72, "Username     : %.56s", b->user);
     snprintf(rows[EDIT_FIELD_PASS],    72, "Password     : %s", b->pass[0] ? "********" : "");
     snprintf(rows[EDIT_FIELD_TMODE],   72, "Terminal Mode: %s", tmode_names[tm]);
     snprintf(rows[EDIT_FIELD_PMODE],   72, "Palette      : %s", pmode_names[pm]);
-    snprintf(rows[EDIT_FIELD_COMMENT], 72, "Comment      : %s", b->comment);
+    snprintf(rows[EDIT_FIELD_COMMENT], 72, "Comment      : %.56s", b->comment);
     snprintf(rows[EDIT_FIELD_SAVE],    72, "[ Save ]");
     snprintf(rows[EDIT_FIELD_CANCEL],  72, "[ Cancel ]");
 

@@ -111,7 +111,9 @@ static void find_binary(const char *name, char *out, size_t outsz)
         if (slash) {
             char try[PATH_MAX];
             *slash = '\0';
-            snprintf(try, sizeof(try), "%s/%s", exe, name);
+            strlcpy(try, exe, sizeof(try));
+            strlcat(try, "/", sizeof(try));
+            strlcat(try, name, sizeof(try));
             if (access(try, X_OK) == 0) {
                 strlcpy(out, try, outsz);
                 return;
