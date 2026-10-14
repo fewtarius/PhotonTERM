@@ -107,7 +107,7 @@ static bool ssh_hostkey_prompt(const char *host, const char *fingerprint_hex,
 bool quitting = false;
 
 /* Version string - updated by scripts/release.sh */
-const char *photonterm_version = "PhotonTERM 20261014.2";
+const char *photonterm_version = "PhotonTERM 20261014.3";
 
 /* ── Signal handling ─────────────────────────────────────────────────── */
 
