@@ -211,7 +211,6 @@ void photon_settings_defaults(photon_settings_t *s)
     memset(s, 0, sizeof(*s));
     s->cols         = 0;   /* 0 = auto-detect from window size */
     s->rows         = 0;
-    s->font_height  = 0;  /* auto */
     s->font_mode    = PHOTON_FONT_TTF;
     s->ttf_path[0]  = 0;  /* bundled */
     s->ttf_size_pt  = 18;
@@ -248,7 +247,6 @@ bool photon_settings_load(photon_settings_t *s)
 
         if      (strcmp(key, "cols")         == 0) s->cols          = atoi(val);
         else if (strcmp(key, "rows")         == 0) s->rows          = atoi(val);
-        else if (strcmp(key, "font_height")  == 0) s->font_height   = atoi(val);
         else if (strcmp(key, "font_mode")    == 0) s->font_mode     = (photon_font_mode_t)atoi(val);
         else if (strcmp(key, "ttf_path")     == 0) strlcpy(s->ttf_path, val, sizeof(s->ttf_path));
         else if (strcmp(key, "ttf_size_pt")  == 0) s->ttf_size_pt   = atoi(val);
@@ -278,7 +276,6 @@ bool photon_settings_save(const photon_settings_t *s)
     fprintf(f, "; PhotonTERM settings\n\n[photonterm]\n");
     fprintf(f, "cols=%d\n",         s->cols);
     fprintf(f, "rows=%d\n",         s->rows);
-    fprintf(f, "font_height=%d\n",  s->font_height);
     fprintf(f, "font_mode=%d\n",    (int)s->font_mode);
     fprintf(f, "ttf_path=%s\n",     s->ttf_path);
     fprintf(f, "ttf_size_pt=%d\n",  s->ttf_size_pt);

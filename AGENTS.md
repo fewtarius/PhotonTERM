@@ -228,10 +228,16 @@ make -C src/photonterm clean         # clean output dir
 Current keys:
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `font_size` | int | 16 | TTF font point size |
-| `term_cols` | int | 80 | Terminal grid columns |
-| `term_rows` | int | 25 | Terminal grid rows |
-| `bell` | bool | true | Visual bell enabled |
+| `cols` | int | 0 (auto) | Terminal grid columns |
+| `rows` | int | 0 (auto) | Terminal grid rows |
+| `font_mode` | int | 1 (TTF) | 0=CP437 bitmap, 1=TTF Unicode |
+| `ttf_path` | string | (empty) | Path to TTF file (empty = embedded Terminus) |
+| `ttf_size_pt` | int | 18 | TTF font point size |
+| `theme` | string | "PhotonTERM" | Active colour theme name |
+| `default_palette_mode` | int | 0 (auto) | 0=auto, 1=ANSI-16, 2=xterm-256 |
+| `invert_scroll` | bool | false | Invert mouse scroll direction |
+| `debug` | bool | false | Enable debug log |
+| `bell_enabled` | bool | true | Visual bell on BEL |
 
 ---
 

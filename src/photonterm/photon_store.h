@@ -5,6 +5,8 @@
  *
  * Reads and writes the bbslist.ini file under ~/.config/photonterm/
  * (with fallback to ~/.photonterm/ for compatibility).
+ * Config path resolution is handled by photon_store_config_dir() in
+ * photon_store.c — there is no platform-specific path code.
  */
 
 #pragma once

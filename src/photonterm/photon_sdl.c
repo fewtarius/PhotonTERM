@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 /* SDL2 headers.  We require SDL2 and SDL2_ttf. */
 #include <SDL2/SDL.h>
@@ -359,6 +360,12 @@ static SDL_Texture *make_texture(SDL_Renderer *ren, int w, int h)
         SDL_PIXELFORMAT_ARGB8888,
         SDL_TEXTUREACCESS_TARGET,
         w, h);
+    /* Use nearest-neighbour scaling so the terminal content stays crisp
+     * when the texture is scaled to the window (e.g. Retina 2x, or
+     * non-grid-aligned window sizes).  The default SDL_ScaleModeSmooth
+     * causes blurry fonts and character art. */
+    if (t)
+        SDL_SetTextureScaleMode(t, SDL_ScaleModeNearest);
     return t;
 }
 
@@ -395,22 +402,50 @@ static const char *find_default_font(void)
     static const char *cached = NULL;
     if (cached) return cached;
 
-    /* 1. Walk up from executable directory to find 3rdp/prefix tree (dev builds) */
+    /* Get the executable directory once — used for both dev (walk_up)
+     * and macOS bundle Resources path resolution. */
     char *base = SDL_GetBasePath();
     if (base) {
+        /* Ensure no trailing slash */
         size_t bl = strlen(base);
-        if (bl > 1 && base[bl-1] == '/') base[bl-1] = '\0'; /* trim trailing slash */
+        if (bl > 1 && base[bl-1] == '/') base[bl-1] = '\0';
+
+        /* 1. Walk up from executable directory to find 3rdp/prefix tree
+         *    (dev builds).  Use 8 levels to handle deeply nested paths. */
         const char *rel = "3rdp/prefix/share/fonts/terminus-ttf/TerminusTTF.ttf";
-        char *found = walk_up_find(base, rel, 4);
+        char *found = walk_up_find(base, rel, 8);
+        if (found) {
+            SDL_free(base);
+            cached = found;
+            return found;
+        }
+
+#ifdef __APPLE__
+        /* 2. macOS app bundle: Contents/Resources/Fonts/TerminusTTF.ttf.
+         *    Walk up from Contents/MacOS to Contents, then to the bundle root. */
+        char bundle_path[4096];
+        strlcpy(bundle_path, base, sizeof(bundle_path));
+        char *last = strrchr(bundle_path, '/');
+        if (last && last != bundle_path) {
+            *last = '\0'; /* Contents/MacOS -> Contents */
+            last = strrchr(bundle_path, '/');
+            if (last && last != bundle_path) {
+                *last = '\0'; /* Contents -> bundle root */
+                strlcat(bundle_path, "/Resources/Fonts/TerminusTTF.ttf",
+                        sizeof(bundle_path));
+                if (font_accessible(bundle_path)) {
+                    SDL_free(base);
+                    cached = strdup(bundle_path);
+                    return cached;
+                }
+            }
+        }
+#endif
         SDL_free(base);
-        if (found) { cached = found; return found; }
     }
 
-    /* 2. CWD-relative and absolute system/bundle paths */
+    /* 3. Absolute system font paths */
     static const char *candidates[] = {
-        "3rdp/prefix/share/fonts/terminus-ttf/TerminusTTF.ttf",
-        "3rdp/prefix/share/fonts/terminus-ttf/TerminusTTF-4.49.3.ttf",
-        "../Resources/Fonts/TerminusTTF.ttf",  /* macOS bundle relative */
         "/usr/share/fonts/truetype/terminus/TerminusTTF.ttf",
         "/usr/local/share/fonts/TerminusTTF.ttf",
         /* macOS system monospace fallbacks */
@@ -582,10 +617,28 @@ photon_sdl_t *photon_sdl_create(const char *title,
     float retina_scale = (draw_w > 0 && win_w > 0)
                          ? (float)draw_w / (float)win_w : 1.0f;
 
+    /* On macOS, SDL_GetRendererOutputSize may return the logical window size
+     * (not the physical backing size) before the window is first rendered.
+     * If renderer output matches logical size (scale ~1.0), fall back to
+     * SDL_GetDisplayDPI to detect the true backing scale factor, so the
+     * initial texture and font rendering are correct from the start rather
+     * than requiring a window resize to trigger the correct scale. */
+    if (retina_scale <= 0.001f || retina_scale < 1.5f) {
+        float ddpi, hdpi, vdpi;
+        if (SDL_GetDisplayDPI(0, &ddpi, &hdpi, &vdpi) == 0 && hdpi > 0) {
+            float nearest = roundf(hdpi / 96.0f);
+            if (nearest >= 1.0f && nearest <= 4.0f) {
+                retina_scale = nearest;
+                draw_w = (int)(win_w * retina_scale);
+                draw_h = (int)(win_h * retina_scale);
+            }
+        }
+    }
+
     /* Tell the renderer to scale logical -> physical automatically */
     SDL_RenderSetScale(ren, retina_scale, retina_scale);
 
-    SDL_Texture *tex = make_texture(ren, win_w, win_h);
+    SDL_Texture *tex = make_texture(ren, draw_w, draw_h);
     if (!tex) {
         snprintf(s_last_error, sizeof(s_last_error),
                  "SDL_CreateTexture: %s", SDL_GetError());
@@ -629,6 +682,8 @@ photon_sdl_t *photon_sdl_create(const char *title,
     ctx->font_pt = (font_pt > 0) ? font_pt : 16;
     PHOTON_DBG("photon_sdl_create: %dx%d cells, cell=%dx%d, font_pt=%d, win=%dx%d",
                cols, rows, cell_w, cell_h, ctx->font_pt, win_w, win_h);
+    PHOTON_DBG("retina_scale=%.2f draw=%dx%d (win=%dx%d)",
+               retina_scale, draw_w, draw_h, win_w, win_h);
     ctx->win_w  = win_w;
     ctx->win_h  = win_h;
     ctx->draw_w = draw_w;
@@ -714,8 +769,10 @@ photon_sdl_t *photon_sdl_create(const char *title,
     SDL_RenderCopy(ren, ctx->texture, NULL, NULL);
     SDL_RenderPresent(ren);
 
-    /* Leave render target active for subsequent draw calls */
+    /* Leave render target active for subsequent draw calls.
+     * SDL_SetRenderTarget resets the renderer scale, so re-apply it. */
     SDL_SetRenderTarget(ren, ctx->texture);
+    SDL_RenderSetScale(ren, ctx->retina_scale, ctx->retina_scale);
 
     return ctx;
 }
@@ -850,8 +907,10 @@ bool photon_sdl_set_font_size(photon_sdl_t *ctx, int pt,
         new_grid_rows = ctx->rows;
         new_win_w = new_grid_cols * cell_w;
         new_win_h = new_grid_rows * cell_h;
-        draw_w = new_win_w;
-        draw_h = new_win_h;
+        /* draw_w/draw_h will be set below from renderer output size
+         * or from log * retina_scale as fallback */
+        draw_w = 0;
+        draw_h = 0;
     }
 
     /* Replace font, geometry */
@@ -898,11 +957,12 @@ bool photon_sdl_set_font_size(photon_sdl_t *ctx, int pt,
     ctx->draw_h = draw_h;
     SDL_RenderSetScale(ctx->ren, ctx->retina_scale, ctx->retina_scale);
 
-    /* Rebuild render-target texture to match new window size */
+    /* Rebuild render-target texture at physical size for HiDPI */
     if (ctx->texture) {
         SDL_DestroyTexture(ctx->texture);
-        ctx->texture = make_texture(ctx->ren, new_win_w, new_win_h);
+        ctx->texture = make_texture(ctx->ren, draw_w, draw_h);
         SDL_SetRenderTarget(ctx->ren, ctx->texture);
+        SDL_RenderSetScale(ctx->ren, ctx->retina_scale, ctx->retina_scale);
     }
 
     /* Update shadow buffer dimensions (same for fullscreen and windowed) */
@@ -1309,6 +1369,7 @@ void photon_sdl_draw_cell(photon_sdl_t *ctx, int col, int row,
                 SDL_Texture *tex = SDL_CreateTextureFromSurface(ctx->ren, surf);
                 SDL_FreeSurface(surf);
                 if (tex) {
+                    SDL_SetTextureScaleMode(tex, SDL_ScaleModeNearest);
                     ctx->glyph_miss_count++;
                     SDL_QueryTexture(tex, NULL, NULL, &gw, &gh);
                     SDL_Rect src  = { 0, 0, gw, gh };
@@ -1430,11 +1491,15 @@ void photon_sdl_fill_rect(photon_sdl_t *ctx,
 void photon_sdl_clear(photon_sdl_t *ctx)
 {
     if (!ctx) return;
+    /* SDL_SetRenderTarget(NULL) resets the renderer's scale settings to 1.0.
+     * Re-apply our HiDPI scale after switching targets. */
     SDL_SetRenderTarget(ctx->ren, NULL);
+    SDL_RenderSetScale(ctx->ren, ctx->retina_scale, ctx->retina_scale);
     SDL_SetRenderDrawColor(ctx->ren, 0, 0, 0, 255);
     SDL_RenderClear(ctx->ren);
     SDL_RenderPresent(ctx->ren);
     SDL_SetRenderTarget(ctx->ren, ctx->texture);
+    SDL_RenderSetScale(ctx->ren, ctx->retina_scale, ctx->retina_scale);
 }
 
 /* ── Present ────────────────────────────────────────────────────────── */
@@ -1447,11 +1512,12 @@ void photon_sdl_present(photon_sdl_t *ctx)
      * its content across frames), so the shadow-buffer skip optimisation
      * works correctly with double-buffered SDL.
      *
-     * The texture dimensions are cols*cell_w x rows*cell_h in logical
-     * pixels.  When the window is larger (cell size doesn't evenly divide
-     * the window, or fullscreen auto-grid with leftover pixels), we center
-     * the grid content rather than stretching. */
+     * The texture is at physical pixel size.  When the window is larger
+     * than the grid (non-grid-aligned resize), we use a src rect to
+     * crop the content area from the texture, then center it via dst.
+     */
     SDL_SetRenderTarget(ctx->ren, NULL);
+    SDL_RenderSetScale(ctx->ren, ctx->retina_scale, ctx->retina_scale);
     int content_w = ctx->cols * ctx->cell_w;
     int content_h = ctx->rows * ctx->cell_h;
     if (content_w > ctx->win_w) content_w = ctx->win_w;
@@ -1459,7 +1525,9 @@ void photon_sdl_present(photon_sdl_t *ctx)
     int off_x = (ctx->win_w - content_w) / 2;
     int off_y = (ctx->win_h - content_h) / 2;
     SDL_Rect dst = { off_x, off_y, content_w, content_h };
-    SDL_RenderCopy(ctx->ren, ctx->texture, NULL, &dst);
+    SDL_Rect src = { 0, 0, (int)(content_w * ctx->retina_scale),
+                     (int)(content_h * ctx->retina_scale) };
+    SDL_RenderCopy(ctx->ren, ctx->texture, &src, &dst);
 
     /* Draw selection highlight overlay on the screen backbuffer (ephemeral).
      * This avoids the overlay persisting on the render-target texture,
@@ -1483,8 +1551,10 @@ void photon_sdl_present(photon_sdl_t *ctx)
     }
 
     SDL_RenderPresent(ctx->ren);
-    /* Re-activate the render target for the next frame's draw calls */
+    /* Re-activate the render target for the next frame's draw calls.
+     * SDL_SetRenderTarget resets the renderer scale, so re-apply it. */
     SDL_SetRenderTarget(ctx->ren, ctx->texture);
+    SDL_RenderSetScale(ctx->ren, ctx->retina_scale, ctx->retina_scale);
 }
 
 /* Reset per-frame glyph cache miss budget.  Called at the start of each
@@ -1531,6 +1601,7 @@ void photon_sdl_show_connecting(photon_sdl_t *ctx, const char *bbs_name)
         if (surf) {
             SDL_Texture *tex = SDL_CreateTextureFromSurface(ctx->ren, surf);
             if (tex) {
+                SDL_SetTextureScaleMode(tex, SDL_ScaleModeNearest);
                 int tw, th;
                 SDL_QueryTexture(tex, NULL, NULL, &tw, &th);
                 /* Center in window */
@@ -1760,15 +1831,44 @@ static void translate_sdl_event(photon_sdl_t *ctx, const SDL_Event *ev)
                  * transition, so if it returns zero, derive from
                  * physical / retina_scale. */
                 SDL_GetWindowSize(ctx->win, &log_w, &log_h);
+                bool in_fs = (SDL_GetWindowFlags(ctx->win) &
+                              (SDL_WINDOW_FULLSCREEN |
+                               SDL_WINDOW_FULLSCREEN_DESKTOP)) != 0;
+                /* During fullscreen transitions, SDL_GetWindowSize may return
+                 * the desktop display mode size (physical pixels) instead of
+                 * the logical point size, which makes the ratio appear to be
+                 * 1.0.  If physical == logical, the scale hasn't been applied
+                 * to the logical query yet — verify via renderer output size
+                 * and keep the existing retina_scale. */
+                if (log_w > 0 && log_h > 0 && ctx->retina_scale > 0.001f) {
+                    int expected_log_w = (int)(draw_w / ctx->retina_scale);
+                    int expected_log_h = (int)(draw_h / ctx->retina_scale);
+                    if (log_w == draw_w && log_h == draw_h && in_fs) {
+                        /* GetWindowSize returned physical size — use the
+                         * expected logical size from physical / scale. */
+                        log_w = expected_log_w;
+                        log_h = expected_log_h;
+                    }
+                }
                 if (log_w <= 0 || log_h <= 0) {
                     log_w = (int)(draw_w / ctx->retina_scale);
                     log_h = (int)(draw_h / ctx->retina_scale);
                 }
-                /* Backing scale may have changed — update retina_scale */
+                /* Backing scale may have changed — update retina_scale.
+                 * During fullscreen transitions, only accept a scale that
+                 * is close to the current value or an integer change,
+                 * and verify the logical/physical dimensions are
+                 * internally consistent. */
                 if (log_w > 0 && draw_w > 0) {
                     float actual = (float)draw_w / (float)log_w;
-                    if (actual >= 0.5f && actual <= 4.0f)
-                        ctx->retina_scale = actual;
+                    if (actual >= 0.5f && actual <= 4.0f) {
+                        /* Accept if close to current scale (normal resize)
+                         * or an integer scale change during fullscreen */
+                        float nearest = roundf(actual);
+                        if (fabsf(actual - ctx->retina_scale) < 0.5f ||
+                            (in_fs && fabsf(actual - nearest) < 0.1f && nearest >= 1.0f && nearest <= 4.0f))
+                            ctx->retina_scale = actual;
+                    }
                 }
             } else {
                 /* WINDOWEVENT_RESIZED: data1/data2 are logical (points) */
@@ -1967,8 +2067,21 @@ static void translate_sdl_event(photon_sdl_t *ctx, const SDL_Event *ev)
                 SDL_GetWindowSize(ctx->win, &win_w2, &win_h2);
                 if (win_w2 > 0 && ren_w > 0) {
                     float new_scale = (float)ren_w / (float)win_w2;
-                    if (new_scale >= 0.5f && new_scale <= 4.0f)
+                    /* During fullscreen exit, renderer output size may be
+                     * stale and return scale=1.0 on a Retina display.
+                     * Fall back to DPI detection when the computed scale
+                     * disagrees with the current value. */
+                    if (new_scale >= 0.5f && new_scale <= 4.0f) {
+                        if (fabsf(new_scale - ctx->retina_scale) > 0.5f) {
+                            float ddpi, hdpi, vdpi;
+                            if (SDL_GetDisplayDPI(0, &ddpi, &hdpi, &vdpi) == 0 && hdpi > 0) {
+                                float nearest = roundf(hdpi / 96.0f);
+                                if (nearest >= 0.5f && nearest <= 4.0f)
+                                    new_scale = nearest;
+                            }
+                        }
                         ctx->retina_scale = new_scale;
+                    }
                 }
             }
 
@@ -2017,12 +2130,17 @@ static void translate_sdl_event(photon_sdl_t *ctx, const SDL_Event *ev)
                     if (ctx->texture) {
                         SDL_DestroyTexture(ctx->texture);
                         ctx->texture = make_texture(ctx->ren,
-                                    ctx->win_w, ctx->win_h);
+                                    ctx->draw_w, ctx->draw_h);
                         SDL_SetRenderTarget(ctx->ren, ctx->texture);
+                        SDL_RenderSetScale(ctx->ren, ctx->retina_scale,
+                                           ctx->retina_scale);
                     }
                     if (ctx->shadow)
                         memset(ctx->shadow, 0,
                                (size_t)ctx->cols * ctx->rows * sizeof(vte_cell_t));
+                    PHOTON_DBG("exit_fullscreen(fixed): log=%dx%d draw=%dx%d scale=%.2f cols=%d rows=%d",
+                               ctx->win_w, ctx->win_h, ctx->draw_w, ctx->draw_h,
+                               ctx->retina_scale, ctx->cols, ctx->rows);
                 }
             } else {
                 /* Auto grid: restore windowed size and recompute grid. */
@@ -2053,6 +2171,9 @@ static void translate_sdl_event(photon_sdl_t *ctx, const SDL_Event *ev)
                 ctx->resize_pending = true;
                 int nc = 0, nr = 0;
                 photon_sdl_check_resize(ctx, &nc, &nr);
+                PHOTON_DBG("exit_fullscreen(auto): log=%dx%d draw=%dx%d scale=%.2f cols=%d rows=%d",
+                           ctx->win_w, ctx->win_h, ctx->draw_w, ctx->draw_h,
+                           ctx->retina_scale, ctx->cols, ctx->rows);
             }
         } else {
             photon_sdl_enter_fullscreen(ctx);
@@ -2355,8 +2476,21 @@ void photon_sdl_enter_fullscreen(photon_sdl_t *ctx)
         SDL_GetWindowSize(ctx->win, &win_w2, &win_h2);
         if (win_w2 > 0 && ren_w > 0) {
             float new_scale = (float)ren_w / (float)win_w2;
-            if (new_scale >= 0.5f && new_scale <= 4.0f)
+            /* During fullscreen transition, renderer output size may be
+             * stale and return scale=1.0.  Fall back to DPI detection
+             * when the computed scale differs greatly from current. */
+            if (new_scale >= 0.5f && new_scale <= 4.0f) {
+                if (fabsf(new_scale - ctx->retina_scale) > 0.5f) {
+                    /* Stale data — try DPI fallback */
+                    float ddpi, hdpi, vdpi;
+                    if (SDL_GetDisplayDPI(0, &ddpi, &hdpi, &vdpi) == 0 && hdpi > 0) {
+                        float nearest = roundf(hdpi / 96.0f);
+                        if (nearest >= 0.5f && nearest <= 4.0f)
+                            new_scale = nearest;
+                    }
+                }
                 ctx->retina_scale = new_scale;
+            }
         }
     }
 
@@ -2398,6 +2532,9 @@ void photon_sdl_enter_fullscreen(photon_sdl_t *ctx)
             ctx->pending_rows = ctx->fixed_rows;
             ctx->resize_pending = true;
         }
+        PHOTON_DBG("enter_fullscreen(fixed): after set_font_size: log=%dx%d draw=%dx%d scale=%.2f cols=%d rows=%d",
+                   ctx->win_w, ctx->win_h, ctx->draw_w, ctx->draw_h,
+                   ctx->retina_scale, ctx->cols, ctx->rows);
         return;
     }
 
@@ -2419,6 +2556,9 @@ void photon_sdl_enter_fullscreen(photon_sdl_t *ctx)
         ctx->draw_w = (int)(dm.w * ctx->retina_scale);
         ctx->draw_h = (int)(dm.h * ctx->retina_scale);
     }
+    PHOTON_DBG("enter_fullscreen: fs log=%dx%d draw=%dx%d scale=%.2f",
+               ctx->win_w, ctx->win_h, ctx->draw_w, ctx->draw_h,
+               ctx->retina_scale);
     photon_sdl_recalc_grid(ctx);
     PHOTON_DBG("enter_fullscreen: after recalc_grid: log=%dx%d draw=%dx%d scale=%.2f",
                ctx->win_w, ctx->win_h, ctx->draw_w, ctx->draw_h, ctx->retina_scale);
@@ -2470,6 +2610,10 @@ bool photon_sdl_check_resize(photon_sdl_t *ctx, int *nc, int *nr)
      * deriving it from log_w * retina_scale rather than trusting a possibly
      * stale SDL_GetRendererOutputSize. */
     SDL_PumpEvents();
+    /* SDL_PumpEvents() may process a queued SIZE_CHANGED event that corrupts
+     * ctx->retina_scale (via translate_sdl_event).  Save it before the pump
+     * and validate after. */
+    float saved_scale = ctx->retina_scale;
     int draw_w, draw_h;
     SDL_GetRendererOutputSize(ctx->ren, &draw_w, &draw_h);
     int log_w = ctx->win_w, log_h = ctx->win_h;
@@ -2500,7 +2644,21 @@ bool photon_sdl_check_resize(photon_sdl_t *ctx, int *nc, int *nr)
     ctx->win_h = log_h;
     ctx->draw_w = draw_w;
     ctx->draw_h = draw_h;
-    ctx->retina_scale = (log_w > 0) ? (float)draw_w / (float)log_w : 1.0f;
+
+    /* Recompute retina_scale, but only accept the new value if it's close
+     * to the scale we had before SDL_PumpEvents (which may have corrupted
+     * ctx->retina_scale via a queued SIZE_CHANGED event during fullscreen
+     * transitions).  The saved_scale is the pre-transition value that we
+     * know is correct. */
+    float new_scale = (log_w > 0 && draw_w > 0)
+                      ? (float)draw_w / (float)log_w : 1.0f;
+    if (new_scale >= 0.5f && new_scale <= 4.0f) {
+        if (fabsf(new_scale - saved_scale) < 0.5f) {
+            ctx->retina_scale = new_scale;
+        }
+        /* If new_scale disagrees with saved_scale, keep saved_scale —
+         * the event handler likely corrupted it with stale data. */
+    }
     SDL_RenderSetScale(ctx->ren, ctx->retina_scale, ctx->retina_scale);
 
     /* Reallocate shadow buffer */
@@ -2509,11 +2667,12 @@ bool photon_sdl_check_resize(photon_sdl_t *ctx, int *nc, int *nr)
     ctx->shadow_cols = new_cols;
     ctx->shadow_rows = new_rows;
 
-    /* Recreate render target texture for new window size */
+    /* Recreate render target texture at physical size for HiDPI */
     if (ctx->texture) {
         SDL_DestroyTexture(ctx->texture);
-        ctx->texture = make_texture(ctx->ren, log_w, log_h);
+        ctx->texture = make_texture(ctx->ren, draw_w, draw_h);
         SDL_SetRenderTarget(ctx->ren, ctx->texture);
+        SDL_RenderSetScale(ctx->ren, ctx->retina_scale, ctx->retina_scale);
     }
 
     if (nc) *nc = new_cols;

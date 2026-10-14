@@ -103,11 +103,11 @@ static bool ssh_hostkey_prompt(const char *host, const char *fingerprint_hex,
     return photon_ui_confirm(photon_ui_global, msg);
 }
 
-/* Global quit flag - used by DarwinWrappers.m (Ctrl-C / window close). */
+/* Global quit flag - checked in main loop for shutdown signal. */
 bool quitting = false;
 
 /* Version string - updated by scripts/release.sh */
-const char *photonterm_version = "PhotonTERM 20261013.1";
+const char *photonterm_version = "PhotonTERM 20261014.2";
 
 /* ── Signal handling ─────────────────────────────────────────────────── */
 
@@ -460,7 +460,7 @@ int main(int argc, char **argv)
 
         /* Steam / Gamescope sends SIGTERM to quit.  Check the flag
          * set by the signal handler so we exit cleanly.
-         * On macOS, the window close button sets the quitting flag. */
+         * The quitting flag is reserved for future macOS integration. */
         if (photonterm_sigterm_pending() || quitting) {
             PHOTON_DBG("SIGTERM received, shutting down");
             state = STATE_SHUTDOWN;
