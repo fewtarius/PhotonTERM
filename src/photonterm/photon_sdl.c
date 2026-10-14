@@ -359,6 +359,12 @@ static SDL_Texture *make_texture(SDL_Renderer *ren, int w, int h)
         SDL_PIXELFORMAT_ARGB8888,
         SDL_TEXTUREACCESS_TARGET,
         w, h);
+    /* Use nearest-neighbour scaling so the terminal content stays crisp
+     * when the texture is scaled to the window (e.g. Retina 2x, or
+     * non-grid-aligned window sizes).  The default SDL_ScaleModeSmooth
+     * causes blurry fonts and character art. */
+    if (t)
+        SDL_SetTextureScaleMode(t, SDL_ScaleModeNearest);
     return t;
 }
 
@@ -395,22 +401,50 @@ static const char *find_default_font(void)
     static const char *cached = NULL;
     if (cached) return cached;
 
-    /* 1. Walk up from executable directory to find 3rdp/prefix tree (dev builds) */
+    /* Get the executable directory once — used for both dev (walk_up)
+     * and macOS bundle Resources path resolution. */
     char *base = SDL_GetBasePath();
     if (base) {
+        /* Ensure no trailing slash */
         size_t bl = strlen(base);
-        if (bl > 1 && base[bl-1] == '/') base[bl-1] = '\0'; /* trim trailing slash */
+        if (bl > 1 && base[bl-1] == '/') base[bl-1] = '\0';
+
+        /* 1. Walk up from executable directory to find 3rdp/prefix tree
+         *    (dev builds).  Use 8 levels to handle deeply nested paths. */
         const char *rel = "3rdp/prefix/share/fonts/terminus-ttf/TerminusTTF.ttf";
-        char *found = walk_up_find(base, rel, 4);
+        char *found = walk_up_find(base, rel, 8);
+        if (found) {
+            SDL_free(base);
+            cached = found;
+            return found;
+        }
+
+#ifdef __APPLE__
+        /* 2. macOS app bundle: Contents/Resources/Fonts/TerminusTTF.ttf.
+         *    Walk up from Contents/MacOS to Contents, then to the bundle root. */
+        char bundle_path[4096];
+        strlcpy(bundle_path, base, sizeof(bundle_path));
+        char *last = strrchr(bundle_path, '/');
+        if (last && last != bundle_path) {
+            *last = '\0'; /* Contents/MacOS -> Contents */
+            last = strrchr(bundle_path, '/');
+            if (last && last != bundle_path) {
+                *last = '\0'; /* Contents -> bundle root */
+                strlcat(bundle_path, "/Resources/Fonts/TerminusTTF.ttf",
+                        sizeof(bundle_path));
+                if (font_accessible(bundle_path)) {
+                    SDL_free(base);
+                    cached = strdup(bundle_path);
+                    return cached;
+                }
+            }
+        }
+#endif
         SDL_free(base);
-        if (found) { cached = found; return found; }
     }
 
-    /* 2. CWD-relative and absolute system/bundle paths */
+    /* 3. Absolute system font paths */
     static const char *candidates[] = {
-        "3rdp/prefix/share/fonts/terminus-ttf/TerminusTTF.ttf",
-        "3rdp/prefix/share/fonts/terminus-ttf/TerminusTTF-4.49.3.ttf",
-        "../Resources/Fonts/TerminusTTF.ttf",  /* macOS bundle relative */
         "/usr/share/fonts/truetype/terminus/TerminusTTF.ttf",
         "/usr/local/share/fonts/TerminusTTF.ttf",
         /* macOS system monospace fallbacks */
@@ -585,7 +619,7 @@ photon_sdl_t *photon_sdl_create(const char *title,
     /* Tell the renderer to scale logical -> physical automatically */
     SDL_RenderSetScale(ren, retina_scale, retina_scale);
 
-    SDL_Texture *tex = make_texture(ren, win_w, win_h);
+    SDL_Texture *tex = make_texture(ren, draw_w, draw_h);
     if (!tex) {
         snprintf(s_last_error, sizeof(s_last_error),
                  "SDL_CreateTexture: %s", SDL_GetError());
@@ -898,10 +932,10 @@ bool photon_sdl_set_font_size(photon_sdl_t *ctx, int pt,
     ctx->draw_h = draw_h;
     SDL_RenderSetScale(ctx->ren, ctx->retina_scale, ctx->retina_scale);
 
-    /* Rebuild render-target texture to match new window size */
+    /* Rebuild render-target texture at physical size for HiDPI */
     if (ctx->texture) {
         SDL_DestroyTexture(ctx->texture);
-        ctx->texture = make_texture(ctx->ren, new_win_w, new_win_h);
+        ctx->texture = make_texture(ctx->ren, draw_w, draw_h);
         SDL_SetRenderTarget(ctx->ren, ctx->texture);
     }
 
@@ -1309,6 +1343,7 @@ void photon_sdl_draw_cell(photon_sdl_t *ctx, int col, int row,
                 SDL_Texture *tex = SDL_CreateTextureFromSurface(ctx->ren, surf);
                 SDL_FreeSurface(surf);
                 if (tex) {
+                    SDL_SetTextureScaleMode(tex, SDL_ScaleModeNearest);
                     ctx->glyph_miss_count++;
                     SDL_QueryTexture(tex, NULL, NULL, &gw, &gh);
                     SDL_Rect src  = { 0, 0, gw, gh };
@@ -1447,10 +1482,10 @@ void photon_sdl_present(photon_sdl_t *ctx)
      * its content across frames), so the shadow-buffer skip optimisation
      * works correctly with double-buffered SDL.
      *
-     * The texture dimensions are cols*cell_w x rows*cell_h in logical
-     * pixels.  When the window is larger (cell size doesn't evenly divide
-     * the window, or fullscreen auto-grid with leftover pixels), we center
-     * the grid content rather than stretching. */
+     * The texture is at physical pixel size.  When the window is larger
+     * than the grid (non-grid-aligned resize), we use a src rect to
+     * crop the content area from the texture, then center it via dst.
+     */
     SDL_SetRenderTarget(ctx->ren, NULL);
     int content_w = ctx->cols * ctx->cell_w;
     int content_h = ctx->rows * ctx->cell_h;
@@ -1459,7 +1494,9 @@ void photon_sdl_present(photon_sdl_t *ctx)
     int off_x = (ctx->win_w - content_w) / 2;
     int off_y = (ctx->win_h - content_h) / 2;
     SDL_Rect dst = { off_x, off_y, content_w, content_h };
-    SDL_RenderCopy(ctx->ren, ctx->texture, NULL, &dst);
+    SDL_Rect src = { 0, 0, (int)(content_w * ctx->retina_scale),
+                     (int)(content_h * ctx->retina_scale) };
+    SDL_RenderCopy(ctx->ren, ctx->texture, &src, &dst);
 
     /* Draw selection highlight overlay on the screen backbuffer (ephemeral).
      * This avoids the overlay persisting on the render-target texture,
@@ -1531,6 +1568,7 @@ void photon_sdl_show_connecting(photon_sdl_t *ctx, const char *bbs_name)
         if (surf) {
             SDL_Texture *tex = SDL_CreateTextureFromSurface(ctx->ren, surf);
             if (tex) {
+                SDL_SetTextureScaleMode(tex, SDL_ScaleModeNearest);
                 int tw, th;
                 SDL_QueryTexture(tex, NULL, NULL, &tw, &th);
                 /* Center in window */
@@ -2017,7 +2055,7 @@ static void translate_sdl_event(photon_sdl_t *ctx, const SDL_Event *ev)
                     if (ctx->texture) {
                         SDL_DestroyTexture(ctx->texture);
                         ctx->texture = make_texture(ctx->ren,
-                                    ctx->win_w, ctx->win_h);
+                                    ctx->draw_w, ctx->draw_h);
                         SDL_SetRenderTarget(ctx->ren, ctx->texture);
                     }
                     if (ctx->shadow)
@@ -2509,10 +2547,10 @@ bool photon_sdl_check_resize(photon_sdl_t *ctx, int *nc, int *nr)
     ctx->shadow_cols = new_cols;
     ctx->shadow_rows = new_rows;
 
-    /* Recreate render target texture for new window size */
+    /* Recreate render target texture at physical size for HiDPI */
     if (ctx->texture) {
         SDL_DestroyTexture(ctx->texture);
-        ctx->texture = make_texture(ctx->ren, log_w, log_h);
+        ctx->texture = make_texture(ctx->ren, draw_w, draw_h);
         SDL_SetRenderTarget(ctx->ren, ctx->texture);
     }
 

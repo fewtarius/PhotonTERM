@@ -140,9 +140,9 @@ Stored as an INI file:
 
 | Platform | Path |
 |----------|------|
-| macOS | `~/Library/Preferences/PhotonTERM/PhotonTERM.lst` |
-| Linux | `~/.config/PhotonTERM/PhotonTERM.lst` |
-| Windows | `%APPDATA%\PhotonTERM\PhotonTERM.lst` |
+| macOS | `~/.config/photonterm/bbslist.ini` |
+| Linux | `~/.config/photonterm/bbslist.ini` |
+| Windows | `%USERPROFILE%\.config\photonterm\bbslist.ini` |
 
 ## Settings
 
@@ -150,9 +150,9 @@ Settings are persisted separately from the BBS list:
 
 | Platform | Path |
 |----------|------|
-| macOS | `~/Library/Preferences/PhotonTERM/settings.ini` |
-| Linux | `~/.config/PhotonTERM/settings.ini` |
-| Windows | `%APPDATA%\PhotonTERM\settings.ini` |
+| macOS | `~/.config/photonterm/settings.ini` |
+| Linux | `~/.config/photonterm/settings.ini` |
+| Windows | `%USERPROFILE%\.config\photonterm\settings.ini` |
 
 ## CI/CD
 
@@ -185,10 +185,9 @@ photonterm/
 │   ├── photon_xfer.c/h       # File transfer (ZModem/YModem/XModem)
 │   ├── photon_debug.c/h      # Debug log (--debug flag)
 │   ├── photon_compat.h       # POSIX portability (asprintf, strlcpy, etc.)
-│   ├── photon_paths.h        # Config path enum + photon_mkdir_p()
 │   ├── photon_bbs.h          # BBS entry struct
 │   ├── photon_cp437_font.c/h # Built-in CP437 bitmap font (fallback)
-│   ├── DarwinWrappers.m/h    # macOS Objective-C (app delegate, paths)
+│   ├── DarwinWrappers.m      # macOS Objective-C (signal handling, app delegate)
 │   ├── early_init.c          # Pre-SDL signal/env setup (Linux, constructor)
 │   ├── Info.plist            # macOS app bundle metadata
 │   ├── CMakeLists.txt        # CMake build rules

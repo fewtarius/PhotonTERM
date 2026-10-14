@@ -191,6 +191,9 @@ bundle: $(BINARY)
 	cp Info.plist $(APPBUNDLE)/Contents/
 	-cp PhotonTERM.icns $(APPBUNDLE)/Contents/Resources/ 2>/dev/null || true
 	echo "APPL????" > $(APPBUNDLE)/Contents/PkgInfo
+	# Bundle Terminus TTF font (for find_default_font() fallback in packaged builds)
+	-mkdir -p $(APPBUNDLE)/Contents/Resources/Fonts
+	-cp $(DEPS_PREFIX)/share/fonts/terminus-ttf/TerminusTTF.ttf $(APPBUNDLE)/Contents/Resources/Fonts/ 2>/dev/null || true
 	# Bundle sz/rz (lrzsz) for ZModem/XModem/YModem file transfers
 	$(if $(wildcard $(DEPS_PREFIX)/bin/lsz), \
 	    cp $(DEPS_PREFIX)/bin/lsz $(APPBUNDLE)/Contents/MacOS/sz && \

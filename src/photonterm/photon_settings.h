@@ -71,12 +71,11 @@ typedef struct photon_settings {
     /* Display */
     int   cols;           /* Terminal columns (default 80) */
     int   rows;           /* Terminal rows (default 25) */
-    int   font_height;    /* Bitmap font height in pixels (0=auto) */
 
     /* Font */
     photon_font_mode_t font_mode;
     char  ttf_path[512]; /* Path to TTF file (empty = bundled Terminus) */
-    int   ttf_size_pt;   /* TTF point size (default 12) */
+    int   ttf_size_pt;   /* TTF point size (default 18) */
 
     /* Theme */
     char  theme_name[64];/* Active theme name */
