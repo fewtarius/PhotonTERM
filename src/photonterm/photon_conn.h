@@ -47,8 +47,20 @@ typedef enum {
 
 /* ── Public API ─────────────────────────────────────────────────────── */
 
-/* Connect to a BBS entry.  Spawns I/O threads.  Returns true on success. */
-bool   photon_conn_connect(const photon_bbs_t *bbs);
+/* Connect to a BBS entry.  Spawns I/O threads.  Returns true on success.
+ * The BBS entry may be updated (e.g. SSH fingerprint stored on first connect).
+ * The caller is responsible for persisting any changes to the BBS entry. */
+bool   photon_conn_connect(photon_bbs_t *bbs);
+
+/* Set a callback invoked when the SSH host key is first seen or has changed.
+ * The callback should display the fingerprint_hex to the user and return
+ * true to accept the key, false to reject the connection.
+ * first_seen is true when there is no stored fingerprint (first connect).
+ * On mismatch (first_seen=false), the user should verify the key change. */
+typedef bool (*photon_conn_hostkey_fn)(const char *host,
+                                        const char *fingerprint_hex,
+                                        bool first_seen, void *userdata);
+void photon_conn_set_hostkey_cb(photon_conn_hostkey_fn fn, void *userdata);
 
 /* Disconnect and join I/O threads. */
 void   photon_conn_close(void);
@@ -102,9 +114,6 @@ int    photon_conn_recv_for(photon_conn_t *C, void *buf, size_t buflen);
 
 /* Send data on a specific connection.  Returns bytes sent, -1 on error. */
 int    photon_conn_send_for(photon_conn_t *C, const void *buf, size_t buflen);
-
-/* Resize the terminal on a specific connection. */
-void   photon_conn_resize_for(photon_conn_t *C, int cols, int rows);
 
 /* Set a callback that is invoked to prompt the user for an SSH password.
  * The callback should return true if the user entered something, false to cancel.

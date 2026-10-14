@@ -95,6 +95,7 @@ static inline void sock_set_nonblock(int fd, int nonblock) {
 #include <string.h>
 #include <time.h>
 #include <limits.h>
+#include <inttypes.h>
 
 /* ── Portable socket type ───────────────────────────────────────────── */
 
@@ -118,6 +119,27 @@ static char s_last_error[256] = "";
 /* SSH password prompt callback (set by photon_conn_set_ssh_prompt) */
 static photon_conn_prompt_fn s_ssh_prompt_fn = NULL;
 static void                 *s_ssh_prompt_ud = NULL;
+
+/* SSH host key verification callback (set by photon_conn_set_hostkey_cb) */
+static photon_conn_hostkey_fn s_hostkey_fn = NULL;
+static void                  *s_hostkey_ud = NULL;
+
+void photon_conn_set_hostkey_cb(photon_conn_hostkey_fn fn, void *userdata)
+{
+    s_hostkey_fn = fn;
+    s_hostkey_ud = userdata;
+}
+
+/* Format a raw fingerprint as lowercase hex string for display. */
+static void hex_encode_str(char *out, size_t outsz,
+                            const unsigned char *in, size_t len)
+{
+    size_t o = 0;
+    for (size_t i = 0; i < len && o + 2 < outsz; i++) {
+        o += snprintf(out + o, outsz - o, "%02x", in[i]);
+    }
+    out[o] = '\0';
+}
 
 static void set_error(const char *fmt, ...)
 {
@@ -303,6 +325,40 @@ static size_t ring_wait_bytes(ring_t *r, size_t bcount, unsigned long timeout_ms
     return found;
 }
 
+/* Wait for at least bcount bytes of FREE space (mu unlocked on entry).
+ * Returns the number of free bytes available (up to bcount).
+ * Used by rx threads to block instead of busy-looping when the ring is full. */
+static size_t ring_wait_free(ring_t *r, size_t bcount, unsigned long timeout_ms)
+{
+    size_t found;
+    pthread_mutex_lock(&r->mu);
+    found = ring_free_bytes(r);
+    if (found >= bcount || timeout_ms == 0) {
+        if (found > bcount) found = bcount;
+        pthread_mutex_unlock(&r->mu);
+        return found;
+    }
+
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ts.tv_sec  += timeout_ms / 1000;
+    ts.tv_nsec += (timeout_ms % 1000) * 1000000L;
+    if (ts.tv_nsec >= 1000000000L) {
+        ts.tv_sec++;
+        ts.tv_nsec -= 1000000000L;
+    }
+
+    r->out_waiters++;
+    while ((found = ring_free_bytes(r)) < bcount) {
+        int rc = pthread_cond_timedwait(&r->out_cond, &r->mu, &ts);
+        if (rc != 0) break;
+    }
+    r->out_waiters--;
+    if (found > bcount) found = bcount;
+    pthread_mutex_unlock(&r->mu);
+    return found;
+}
+
 /* ── Connection state ───────────────────────────────────────────────── */
 
 /* I/O thread state */
@@ -324,6 +380,9 @@ struct photon_conn {
     /* Telnet */
     photon_sock_t   telnet_sock;
     pthread_mutex_t  telnet_send_mu; /* serializes direct-send and TX thread */
+    unsigned char   tl_local[256];   /* local telnet option states */
+    unsigned char   tl_remote[256];  /* remote telnet option states */
+    bool            sb_active;      /* inside IAC SB subnegotiation (across recv() boundaries) */
 
     /* SSH */
     photon_sock_t   ssh_sock;
@@ -359,30 +418,54 @@ int photon_conn_raw_fd(void)
     }
 }
 
-/* ── Telnet option state ─────────────────────────────────────────────── */
+/* ── Telnet option state (per-connection, stored in photon_conn_t) ────── */
 
-static unsigned char tl_local[256];   /* local option states */
-static unsigned char tl_remote[256];  /* remote option states */
-
-static void telnet_request_opt(unsigned char what, unsigned char opt)
+static void telnet_request_opt(photon_conn_t *C, unsigned char what, unsigned char opt)
 {
     unsigned char buf[3] = { TELNET_IAC, what, opt };
-    if (s_active->telnet_sock != PHOTON_INVALID_SOCK) {
-        pthread_mutex_lock(&s_active->telnet_send_mu);
-        send(s_active->telnet_sock, (const char *)buf, 3, 0);
-        pthread_mutex_unlock(&s_active->telnet_send_mu);
+    if (C && C->telnet_sock != PHOTON_INVALID_SOCK) {
+        pthread_mutex_lock(&C->telnet_send_mu);
+        send(C->telnet_sock, (const char *)buf, 3, 0);
+        pthread_mutex_unlock(&C->telnet_send_mu);
     }
 }
 
 /* Minimal telnet negotiation: parse IAC sequences out of the stream.
  * Returns the number of bytes placed into out (always <= inlen).
- * Handles WILL/WONT/DO/DONT and SB..SE (skipped).
+ * Handles WILL/WONT/DO/DONT and SB..SE (skipped).  SB subnegotiation
+ * state is confined to a single call, so sequences split across recv()
+ * boundaries are handled at the caller level (each recv is a complete
+ * call).  Option state is per-connection via C->tl_local/tl_remote.
  */
-static size_t telnet_interpret(const unsigned char *in, size_t inlen,
+static size_t telnet_interpret(photon_conn_t *C, const unsigned char *in, size_t inlen,
                                 unsigned char *out, size_t outmax)
 {
     size_t oi = 0;
     size_t i  = 0;
+
+    /* If we were inside a subnegotiation (IAC SB) that straddled a
+     * previous recv() boundary, scan for the IAC SE terminator first. */
+    if (C->sb_active) {
+        while (i < inlen) {
+            if (in[i] == TELNET_IAC) {
+                if (i + 1 < inlen) {
+                    unsigned char nxt = in[i + 1];
+                    if (nxt == TELNET_SE) {
+                        C->sb_active = false;
+                        i += 2;
+                        break;
+                    }
+                    /* Escaped IAC inside SB data, or IAC + other cmd: skip both */
+                    i += 2;
+                    continue;
+                }
+                /* IAC at end of buffer without following byte - keep sb_active */
+                i++;
+                break;
+            }
+            i++;
+        }
+    }
 
     while (i < inlen && oi < outmax) {
         if (in[i] != TELNET_IAC) {
@@ -399,10 +482,29 @@ static size_t telnet_interpret(const unsigned char *in, size_t inlen,
             continue;
         }
         if (cmd == TELNET_SB) {
-            /* Subnegotiation: skip until IAC SE */
+            /* Enter subnegotiation: skip data until IAC SE.
+             * If IAC SE is not in this buffer, state persists in C->sb_active
+             * and the next telnet_interpret() call will continue scanning. */
+            C->sb_active = true;
+            /* Skip the option byte */
+            if (i >= inlen) break;
+            (void)in[i++]; /* option code */
+            /* Scan remaining data for IAC SE */
             while (i < inlen) {
-                if (in[i] == TELNET_IAC && i + 1 < inlen && in[i+1] == TELNET_SE) {
-                    i += 2;
+                if (in[i] == TELNET_IAC) {
+                    if (i + 1 < inlen) {
+                        unsigned char nxt = in[i + 1];
+                        if (nxt == TELNET_SE) {
+                            C->sb_active = false;
+                            i += 2;
+                            break;
+                        }
+                        /* Escaped IAC or IAC + cmd inside SB data: skip both */
+                        i += 2;
+                        continue;
+                    }
+                    /* IAC at end of buffer - will continue scanning next call */
+                    i++;
                     break;
                 }
                 i++;
@@ -416,21 +518,21 @@ static size_t telnet_interpret(const unsigned char *in, size_t inlen,
             /* Simple auto-respond */
             if (cmd == TELNET_DO) {
                 if (opt == TELOPT_SGA || opt == TELOPT_BINARY) {
-                    if (!tl_local[opt]) {
-                        tl_local[opt] = 1;
-                        telnet_request_opt(TELNET_WILL, opt);
+                    if (!C->tl_local[opt]) {
+                        C->tl_local[opt] = 1;
+                        telnet_request_opt(C, TELNET_WILL, opt);
                     }
                 } else {
-                    telnet_request_opt(TELNET_WONT, opt);
+                    telnet_request_opt(C, TELNET_WONT, opt);
                 }
             } else if (cmd == TELNET_WILL) {
                 if (opt == TELOPT_ECHO || opt == TELOPT_SGA || opt == TELOPT_BINARY) {
-                    if (!tl_remote[opt]) {
-                        tl_remote[opt] = 1;
-                        telnet_request_opt(TELNET_DO, opt);
+                    if (!C->tl_remote[opt]) {
+                        C->tl_remote[opt] = 1;
+                        telnet_request_opt(C, TELNET_DO, opt);
                     }
                 } else {
-                    telnet_request_opt(TELNET_DONT, opt);
+                    telnet_request_opt(C, TELNET_DONT, opt);
                 }
             }
             continue;
@@ -440,36 +542,55 @@ static size_t telnet_interpret(const unsigned char *in, size_t inlen,
     return oi;
 }
 
-static void telnet_send_initial_options(void)
+static void telnet_send_initial_options(photon_conn_t *C)
 {
-    memset(tl_local,  0, sizeof(tl_local));
-    memset(tl_remote, 0, sizeof(tl_remote));
+    memset(C->tl_local,  0, sizeof(C->tl_local));
+    memset(C->tl_remote, 0, sizeof(C->tl_remote));
     /* Suppress Go Ahead both ways */
-    telnet_request_opt(TELNET_WILL, TELOPT_SGA);
-    tl_local[TELOPT_SGA] = 1;
-    telnet_request_opt(TELNET_DO,   TELOPT_SGA);
-    tl_remote[TELOPT_SGA] = 1;
+    telnet_request_opt(C, TELNET_WILL, TELOPT_SGA);
+    C->tl_local[TELOPT_SGA] = 1;
+    telnet_request_opt(C, TELNET_DO,   TELOPT_SGA);
+    C->tl_remote[TELOPT_SGA] = 1;
     /* Binary mode both ways */
-    telnet_request_opt(TELNET_WILL, TELOPT_BINARY);
-    tl_local[TELOPT_BINARY] = 1;
-    telnet_request_opt(TELNET_DO,   TELOPT_BINARY);
-    tl_remote[TELOPT_BINARY] = 1;
+    telnet_request_opt(C, TELNET_WILL, TELOPT_BINARY);
+    C->tl_local[TELOPT_BINARY] = 1;
+    telnet_request_opt(C, TELNET_DO,   TELOPT_BINARY);
+    C->tl_remote[TELOPT_BINARY] = 1;
     /* Request server echo */
-    telnet_request_opt(TELNET_DO,   TELOPT_ECHO);
-    tl_remote[TELOPT_ECHO] = 1;
+    telnet_request_opt(C, TELNET_DO,   TELOPT_ECHO);
+    C->tl_remote[TELOPT_ECHO] = 1;
 }
 
-/* Expand outgoing data: double IAC bytes, convert lone CR -> CRNUL */
+/* Expand outgoing data per RFC 854 §3.1.1.2:
+ *  - Double IAC bytes (0xFF -> 0xFF 0xFF)
+ *  - Convert lone CR (0x0D not followed by \n or \0) to CR + NUL (0x0D 0x00)
+ * A CR followed by \n or NUL is passed through unchanged, since those
+ * sequences already unambiguously represent CR without telnet interpretation.
+ */
 static size_t telnet_expand(const unsigned char *in, size_t inlen,
                              unsigned char *out, size_t outmax)
 {
     size_t oi = 0;
-    for (size_t i = 0; i < inlen && oi + 1 < outmax; i++) {
+    for (size_t i = 0; i < inlen; i++) {
         if (in[i] == TELNET_IAC) {
             out[oi++] = TELNET_IAC;
             if (oi >= outmax) break;
+            out[oi++] = TELNET_IAC;
+        } else if (in[i] == '\r') {
+            /* Check if this CR is followed by \n or NUL — those are
+             * allowed through as-is per RFC 854 */
+            if (i + 1 < inlen && (in[i + 1] == '\n' || in[i + 1] == '\0')) {
+                out[oi++] = '\r';
+            } else {
+                /* Lone CR: convert to CR + NUL */
+                out[oi++] = '\r';
+                if (oi >= outmax) break;
+                out[oi++] = '\0';
+            }
+        } else {
+            out[oi++] = in[i];
         }
-        out[oi++] = in[i];
+        if (oi >= outmax) break;
     }
     return oi;
 }
@@ -585,17 +706,14 @@ static void *telnet_rx_thread(void *arg)
             break;
         }
 
-        size_t outlen = telnet_interpret(raw, (size_t)rd, parsed, RING_SIZE + 4);
+        size_t outlen = telnet_interpret(C, raw, (size_t)rd, parsed, RING_SIZE + 4);
         size_t sent = 0;
         while (sent < outlen && !atomic_load(&C->terminate)) {
-            ring_wait_bytes(C->inbuf, 0, 0); /* ensure lock */
+            /* Wait for free space (blocks instead of busy-looping) */
+            ring_wait_free(C->inbuf, 1, 100);
             pthread_mutex_lock(&C->inbuf->mu);
             sent += ring_put(C->inbuf, parsed + sent, outlen - sent);
             pthread_mutex_unlock(&C->inbuf->mu);
-            if (sent < outlen) {
-                struct timespec ts = {0, 1000000L};
-                nanosleep(&ts, NULL);
-            }
         }
     }
 
@@ -685,13 +803,11 @@ static void *ssh_rx_thread(void *arg)
 
         size_t sent = 0;
         while (sent < (size_t)rd && !atomic_load(&C->terminate)) {
+            /* Wait for free space (blocks instead of busy-looping) */
+            ring_wait_free(C->inbuf, 1, 100);
             pthread_mutex_lock(&C->inbuf->mu);
             sent += ring_put(C->inbuf, buf + sent, (size_t)rd - sent);
             pthread_mutex_unlock(&C->inbuf->mu);
-            if (sent < (size_t)rd) {
-                struct timespec ts = {0, 1000000L};
-                nanosleep(&ts, NULL);
-            }
         }
     }
 
@@ -856,7 +972,7 @@ static bool ssh_authenticate(LIBSSH2_SESSION *sess, const char *user,
 
 /* ── SSH connect ────────────────────────────────────────────────────── */
 
-static bool conn_ssh_connect(const photon_bbs_t *bbs)
+static bool conn_ssh_connect(photon_bbs_t *bbs)
 {
     uint16_t port = photon_bbs_port(bbs);
     photon_sock_t fd = tcp_connect(bbs->addr, port);
@@ -875,13 +991,52 @@ static bool conn_ssh_connect(const photon_bbs_t *bbs)
     }
     if (rc) { set_error("SSH handshake failed: %d", rc); goto fail; }
 
-    /* Fingerprint check */
-    const char *fp = libssh2_hostkey_hash(sess, LIBSSH2_HOSTKEY_HASH_SHA1);
-    if (bbs->has_fingerprint && fp) {
-        if (memcmp(fp, bbs->ssh_fingerprint, PHOTON_FINGERPRINT_LEN) != 0) {
-            set_error("SSH host key mismatch for %s", bbs->addr);
+    /* Fingerprint verification (SHA-256).
+     * On first connect (no stored fingerprint): auto-accept, store, and
+     * let the user know. On subsequent connects: compare and prompt on
+     * mismatch via the hostkey callback. */
+    {
+        const char *fp = libssh2_hostkey_hash(sess, LIBSSH2_HOSTKEY_HASH_SHA256);
+        if (!fp) {
+            set_error("SSH: could not obtain host key fingerprint");
             goto fail;
         }
+
+        char fp_hex[PHOTON_FINGERPRINT_LEN * 2 + 1];
+        hex_encode_str(fp_hex, sizeof(fp_hex),
+                       (const unsigned char *)fp, PHOTON_FINGERPRINT_LEN);
+
+        bool accept = true;
+        if (bbs->has_fingerprint) {
+            /* Compare stored fingerprint against the current one */
+            if (memcmp(fp, bbs->ssh_fingerprint, PHOTON_FINGERPRINT_LEN) != 0) {
+                /* Host key changed — prompt the user to confirm */
+                PHOTON_DBG("ssh: host key changed for %s\n  old: stored\n  new: %s",
+                           bbs->addr, fp_hex);
+                if (s_hostkey_fn)
+                    accept = s_hostkey_fn(bbs->addr, fp_hex, false, s_hostkey_ud);
+                else
+                    accept = false;
+                if (!accept) {
+                    set_error("SSH host key mismatch for %s", bbs->addr);
+                    goto fail;
+                }
+            }
+        } else {
+            /* First connection — auto-accept and store */
+            PHOTON_DBG("ssh: first connect to %s, storing fingerprint: %s",
+                       bbs->addr, fp_hex);
+            if (s_hostkey_fn)
+                accept = s_hostkey_fn(bbs->addr, fp_hex, true, s_hostkey_ud);
+            if (accept) {
+                memcpy(bbs->ssh_fingerprint, fp, PHOTON_FINGERPRINT_LEN);
+                bbs->has_fingerprint = true;
+            } else {
+                set_error("SSH host key verification cancelled by user");
+                goto fail;
+            }
+        }
+        (void)accept;
     }
 
     if (!ssh_authenticate(sess,
@@ -959,12 +1114,11 @@ static bool conn_telnet_connect(const photon_bbs_t *bbs)
         nanosleep(&ts, NULL);
     }
 
-    telnet_send_initial_options();
+    telnet_send_initial_options(s_active);
     return true;
 }
 
 /* ── PTY / shell connect (POSIX) ────────────────────────────────────── */
-
 #ifdef __unix__
 #include <termios.h>
 #include <sys/ioctl.h>
@@ -981,6 +1135,7 @@ static void *pty_rx_thread(void *arg)
         if (rd <= 0) break;
         size_t sent = 0;
         while (sent < (size_t)rd && !atomic_load(&C->terminate)) {
+            ring_wait_free(C->inbuf, 1, 100);
             pthread_mutex_lock(&C->inbuf->mu);
             sent += ring_put(C->inbuf, buf + sent, (size_t)rd - sent);
             pthread_mutex_unlock(&C->inbuf->mu);
@@ -1141,6 +1296,7 @@ static void *conpty_rx_thread(void *arg)
         if (!ok || rd == 0) break;
         size_t sent = 0;
         while (sent < (size_t)rd && !atomic_load(&C->terminate)) {
+            ring_wait_free(C->inbuf, 1, 100);
             pthread_mutex_lock(&C->inbuf->mu);
             sent += ring_put(C->inbuf, buf + sent, (size_t)rd - sent);
             pthread_mutex_unlock(&C->inbuf->mu);
@@ -1285,7 +1441,7 @@ static bool conn_shell_connect(const photon_bbs_t *bbs)
 
 /* ── Public API ─────────────────────────────────────────────────────── */
 
-bool photon_conn_connect(const photon_bbs_t *bbs)
+bool photon_conn_connect(photon_bbs_t *bbs)
 {
 #ifdef _WIN32
     /* Ensure Winsock is initialised */
@@ -1350,7 +1506,8 @@ void photon_conn_close(void)
     if (!s_active) return;
     atomic_store(&s_active->terminate, true);
 
-    /* Unblock any ring waits */
+    /* Unblock any ring waits so I/O threads can observe the termination
+     * flag and exit promptly. */
     if (s_active->inbuf) {
         pthread_mutex_lock(&s_active->inbuf->mu);
         pthread_cond_broadcast(&s_active->inbuf->in_cond);
@@ -1364,27 +1521,21 @@ void photon_conn_close(void)
         pthread_mutex_unlock(&s_active->outbuf->mu);
     }
 
-    /* Close sockets / fds */
+    /* Close sockets / fds so blocked I/O calls (recv, read, sock_readable)
+     * return and the threads can observe the terminate flag.  We do NOT
+     * destroy mutexes or free SSH/libssh2 resources here — the threads
+     * may still be using them. */
     if (s_active->telnet_sock != PHOTON_INVALID_SOCK) {
         shutdown(s_active->telnet_sock, SHUT_RDWR);
         close(s_active->telnet_sock);
         s_active->telnet_sock = PHOTON_INVALID_SOCK;
+        /* Telnet mutex was initialized during connect — destroy it now
+         * that the socket is closed and threads are joined. */
         pthread_mutex_destroy(&s_active->telnet_send_mu);
     }
     if (s_active->ssh_sock != PHOTON_INVALID_SOCK) {
-        if (s_active->ssh_channel) {
-            libssh2_channel_close(s_active->ssh_channel);
-            libssh2_channel_free(s_active->ssh_channel);
-            s_active->ssh_channel = NULL;
-        }
-        if (s_active->ssh_session) {
-            libssh2_session_disconnect(s_active->ssh_session, "Goodbye");
-            libssh2_session_free(s_active->ssh_session);
-            s_active->ssh_session = NULL;
-        }
         close(s_active->ssh_sock);
         s_active->ssh_sock = PHOTON_INVALID_SOCK;
-        pthread_mutex_destroy(&s_active->ssh_mu);
     }
 #ifdef __unix__
     if (s_active->pty_fd >= 0) {
@@ -1405,6 +1556,29 @@ void photon_conn_close(void)
         CloseHandle(s_active->conpty_out);
         s_active->conpty_out = INVALID_HANDLE_VALUE;
     }
+#endif
+
+    /* Join I/O threads FIRST — they may still be using the mutexes,
+     * SSH channel, session, and ring buffers above. */
+    if (atomic_load(&s_active->rx.running) > 0) pthread_join(s_active->rx.thread, NULL);
+    if (atomic_load(&s_active->tx.running) > 0) pthread_join(s_active->tx.thread, NULL);
+
+    /* NOW safe to destroy mutexes and free SSH resources.
+     * The telnet mutex was already destroyed above when the socket
+     * was closed (only for telnet connections).  SSH resources are
+     * destroyed here if the session was established. */
+    if (s_active->ssh_session) {
+        if (s_active->ssh_channel) {
+            libssh2_channel_close(s_active->ssh_channel);
+            libssh2_channel_free(s_active->ssh_channel);
+            s_active->ssh_channel = NULL;
+        }
+        libssh2_session_disconnect(s_active->ssh_session, "Goodbye");
+        libssh2_session_free(s_active->ssh_session);
+        s_active->ssh_session = NULL;
+        pthread_mutex_destroy(&s_active->ssh_mu);
+    }
+#ifdef _WIN32
     if (s_active->conpty_pi.hProcess) {
         TerminateProcess(s_active->conpty_pi.hProcess, 0);
         CloseHandle(s_active->conpty_pi.hProcess);
@@ -1412,10 +1586,6 @@ void photon_conn_close(void)
         memset(&s_active->conpty_pi, 0, sizeof(s_active->conpty_pi));
     }
 #endif
-
-    /* Join threads */
-    if (atomic_load(&s_active->rx.running) > 0) pthread_join(s_active->rx.thread, NULL);
-    if (atomic_load(&s_active->tx.running) > 0) pthread_join(s_active->tx.thread, NULL);
 
     ring_free(s_active->inbuf);
     ring_free(s_active->outbuf);
@@ -1594,11 +1764,5 @@ int photon_conn_send_for(photon_conn_t *C, const void *buf, size_t buflen)
     return (int)n;
 }
 
-void photon_conn_resize_for(photon_conn_t *C, int cols, int rows)
-{
-    if (!C || cols < 1 || rows < 1) return;
-    photon_conn_t *prev = s_active;
-    s_active = C;
-    photon_conn_resize(cols, rows);
-    s_active = prev;
-}
+
+/* ── Resize (uses the active connection) ───────────────────────────── */

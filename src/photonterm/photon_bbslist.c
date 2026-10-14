@@ -58,90 +58,6 @@ extern const char *photonterm_version;
 /* Cursor indicator */
 #define ARROW_RIGHT 0x25BAu /* ► */
 
-/* ── Theme colour helpers ────────────────────────────────────────────── */
-/*
- * Colours are derived from the currently active theme (photon_active_theme).
- * We follow the same uifc field semantics as the original:
- *   t->hclr   = border/frame fg
- *   t->lclr   = normal text fg
- *   t->bclr   = window bg
- *   t->cclr   = inactive / column-header bg
- *   t->lbclr  = selection bar fg
- *   t->lbbclr = selection bar bg
- */
-static const photon_theme_t *active_theme(void)
-{
-    int idx = photon_active_theme;
-    if (idx < 0) idx = 0;
-    /* bounds check */
-    int n = 0; while (photon_themes[n].name) n++;
-    if (idx >= n) idx = 0;
-    return &photon_themes[idx];
-}
-
-/* Compose fg+bg into an attribute byte (high nibble = bg, low = fg) */
-#define ATTR(fg, bg) ((uint8_t)(((bg) << 4) | ((fg) & 0x0f)))
-
-/* Frequently used attribute combos */
-#define A_BOX(t)    ATTR((t)->hclr,    (t)->bclr)      /* border             */
-#define A_TITLE(t)  ATTR(CGA_BLACK,    (t)->hclr)      /* title in border    */
-#define A_NORM(t)   ATTR((t)->lclr,    (t)->bclr)      /* normal text        */
-#define A_HDR(t)    ATTR((t)->lclr,    (t)->cclr)      /* column header row  */
-#define A_DIM(t)    ATTR((t)->cclr,    (t)->bclr)      /* dim/type text      */
-#define A_SEL(t)    ATTR((t)->lbclr,   (t)->lbbclr)    /* selection bar      */
-#define A_SEL_HI(t) ATTR((t)->hclr,    (t)->lbbclr)    /* bright on sel bar  */
-#define A_HINT(t)   ATTR((t)->lclr,    (t)->bclr)      /* hint row           */
-#define A_HINT_K(t) ATTR((t)->hclr,    (t)->bclr)      /* key name in hints  */
-#define A_ACCENT(t) ATTR(CGA_BLACK,    (t)->hclr)      /* splash accent bars */
-#define A_STATUS(t) ATTR((t)->lclr,    (t)->bclr)      /* status bar         */
-
-/* ── Low-level cell drawing ─────────────────────────────────────────── */
-
-static void put_cell(photon_ui_t *ui, int col, int row,
-                     uint32_t cp, uint8_t attr)
-{
-    vte_cell_t cell = {
-        .codepoint = cp,
-        .fg = attr & 0x0f,
-        .bg = (attr >> 4) & 0x0f,
-        .attr = 0
-    };
-    photon_sdl_draw_cell(photon_ui_sdl(ui), col, row, &cell);
-}
-
-/* Write a NUL-terminated UTF-8 string starting at (col, row) */
-static int put_str(photon_ui_t *ui, int col, int row,
-                   const char *s, uint8_t attr)
-{
-    int c = col;
-    const unsigned char *p = (const unsigned char *)s;
-    while (*p) {
-        uint32_t cp;
-        if      (*p < 0x80) { cp = *p++; }
-        else if ((*p & 0xe0) == 0xc0) {
-            cp = (uint32_t)(*p++ & 0x1f) << 6;
-            if (*p) cp |= (*p++ & 0x3f);
-        } else if ((*p & 0xf0) == 0xe0) {
-            cp = (uint32_t)(*p++ & 0x0f) << 12;
-            if (*p) cp |= (uint32_t)(*p++ & 0x3f) << 6;
-            if (*p) cp |= (*p++ & 0x3f);
-        } else { cp = '?'; p++; }
-        put_cell(ui, c++, row, cp, attr);
-    }
-    return c - col;  /* chars written */
-}
-
-/* Fill a rectangle with spaces */
-static void fill_rect(photon_ui_t *ui,
-                      int c1, int r1, int c2, int r2, uint8_t attr)
-{
-    uint8_t fg = attr & 0x0f;
-    uint8_t bg = (attr >> 4) & 0x0f;
-    photon_sdl_fill_rect(photon_ui_sdl(ui), c1, r1, c2, r2, fg, bg);
-}
-
-/* Write a string padded/clipped to exactly `width` columns */
-/* ── Connection type short label ─────────────────────────────────────── */
 
 static const char *conn_type_label(photon_conn_type_t t)
 {
@@ -159,20 +75,16 @@ static const char *conn_type_label(photon_conn_type_t t)
 #define DIR_COL_TYPE  3   /* "SSH" */
 #define DIR_COL_SEP   1   /* space after name */
 
-/* ── Terminal size helpers ──────────────────────────────────────────── */
-static int tcols(photon_ui_t *ui) { return photon_menu_cols(ui); }
-static int trows(photon_ui_t *ui) { return photon_menu_rows(ui); }
-
 /* ── Status bar ─────────────────────────────────────────────────────── */
 static void draw_statusbar(photon_ui_t *ui, bool connected, const char *bbs_name)
 {
-    const photon_theme_t *t = active_theme();
-    int W = tcols(ui);
-    int H = trows(ui);
-    uint8_t a = A_STATUS(t);
+    const photon_theme_t *t = photon_menu_theme();
+    int W = photon_menu_cols(ui);
+    int H = photon_menu_rows(ui);
+    uint8_t a = PHOTON_MENU_A_STATUS(t);
 
     /* Clear row */
-    fill_rect(ui, 1, H, W, H, a);
+    photon_menu_fill_rect(ui, 1, H, W, H, a);
 
     if (connected && bbs_name && bbs_name[0]) {
         char rbuf[64];
@@ -180,27 +92,27 @@ static void draw_statusbar(photon_ui_t *ui, bool connected, const char *bbs_name
         int rlen = (int)strlen(rbuf);
         int col  = W - rlen + 1;
         if (col < 1) col = 1;
-        put_str(ui, col, H, rbuf, ATTR((t)->hclr, (t)->bclr));
+        photon_menu_put_str(ui, col, H, rbuf, PHOTON_MENU_ATTR((t)->hclr, (t)->bclr));
     }
 }
 
 /* Show BBS entry info in the status bar (last connected, call count, comment) */
 static void draw_entry_statusbar(photon_ui_t *ui, const photon_bbs_t *bbs)
 {
-    const photon_theme_t *t = active_theme();
-    int W = tcols(ui);
-    int H = trows(ui);
-    uint8_t a  = A_STATUS(t);
-    uint8_t ah = ATTR((t)->hclr, (t)->bclr);
+    const photon_theme_t *t = photon_menu_theme();
+    int W = photon_menu_cols(ui);
+    int H = photon_menu_rows(ui);
+    uint8_t a  = PHOTON_MENU_A_STATUS(t);
+    uint8_t ah = PHOTON_MENU_ATTR((t)->hclr, (t)->bclr);
 
-    fill_rect(ui, 1, H, W, H, a);
+    photon_menu_fill_rect(ui, 1, H, W, H, a);
 
     /* Left: comment (if any) */
     if (bbs->comment[0]) {
         char lbuf[128];
         lbuf[0] = ' ';
         strlcpy(lbuf + 1, bbs->comment, sizeof(lbuf) - 1);
-        put_str(ui, 1, H, lbuf, a);
+        photon_menu_put_str(ui, 1, H, lbuf, a);
     }
 
     /* Right: calls + last connected */
@@ -216,15 +128,15 @@ static void draw_entry_statusbar(photon_ui_t *ui, const photon_bbs_t *bbs)
     int rlen = (int)strlen(rbuf);
     int col  = W - rlen + 1;
     if (col < 1) col = 1;
-    put_str(ui, col, H, rbuf, ah);
+    photon_menu_put_str(ui, col, H, rbuf, ah);
 }
 
 /* ── Splash screen ──────────────────────────────────────────────────── */
 static void draw_splash(photon_ui_t *ui)
 {
-    const photon_theme_t *t = active_theme();
-    int W = tcols(ui);
-    int H = trows(ui);
+    const photon_theme_t *t = photon_menu_theme();
+    int W = photon_menu_cols(ui);
+    int H = photon_menu_rows(ui);
     int mid = W / 2;
 
     /* Clean version (strip debug suffix) */
@@ -244,27 +156,27 @@ static void draw_splash(photon_ui_t *ui)
     static const char *sub  = "Retro BBS Terminal";
     int slen = (int)strlen(sub);
 
-    uint8_t bg_attr  = A_NORM(t);
-    uint8_t acc_attr = A_ACCENT(t);
+    uint8_t bg_attr  = PHOTON_MENU_A_NORM(t);
+    uint8_t acc_attr = PHOTON_MENU_A_ACCENT(t);
 
     /* Clear usable area (all except last row = status bar) */
-    fill_rect(ui, 1, 1, W, H - 1, bg_attr);
+    photon_menu_fill_rect(ui, 1, 1, W, H - 1, bg_attr);
 
     /* Vertically centre the logo block (4 rows tall) */
     int logo_row = (H - 1 - 4) / 2;
     if (logo_row < 2) logo_row = 2;
 
     /* Accent bars */
-    fill_rect(ui, 1, logo_row,     W, logo_row,     acc_attr);
-    fill_rect(ui, 1, logo_row + 3, W, logo_row + 3, acc_attr);
+    photon_menu_fill_rect(ui, 1, logo_row,     W, logo_row,     acc_attr);
+    photon_menu_fill_rect(ui, 1, logo_row + 3, W, logo_row + 3, acc_attr);
 
     /* Version line */
-    fill_rect(ui, 1, logo_row + 1, W, logo_row + 1, bg_attr);
-    put_str(ui, mid - vlen / 2, logo_row + 1, verbuf, ATTR((t)->hclr, (t)->bclr));
+    photon_menu_fill_rect(ui, 1, logo_row + 1, W, logo_row + 1, bg_attr);
+    photon_menu_put_str(ui, mid - vlen / 2, logo_row + 1, verbuf, PHOTON_MENU_ATTR((t)->hclr, (t)->bclr));
 
     /* Subtitle */
-    fill_rect(ui, 1, logo_row + 2, W, logo_row + 2, bg_attr);
-    put_str(ui, mid - slen / 2, logo_row + 2, sub, A_DIM(t));
+    photon_menu_fill_rect(ui, 1, logo_row + 2, W, logo_row + 2, bg_attr);
+    photon_menu_put_str(ui, mid - slen / 2, logo_row + 2, sub, PHOTON_MENU_A_DIM(t));
 
     /* Key hints */
     int hint_row = H - 3;
@@ -278,13 +190,13 @@ static void draw_splash(photon_ui_t *ui)
     int col = mid - hint_len / 2;
     if (col < 1) col = 1;
 
-    fill_rect(ui, 1, hint_row, W, hint_row, bg_attr);
-    col += put_str(ui, col, hint_row, k1, A_HINT_K(t));
-    col += put_str(ui, col, hint_row, d1, A_HINT(t));
-    col += put_str(ui, col, hint_row, k2, A_HINT_K(t));
-    col += put_str(ui, col, hint_row, d2, A_HINT(t));
-    col += put_str(ui, col, hint_row, k3, A_HINT_K(t));
-    col += put_str(ui, col, hint_row, d3, A_HINT(t));
+    photon_menu_fill_rect(ui, 1, hint_row, W, hint_row, bg_attr);
+    col += photon_menu_put_str(ui, col, hint_row, k1, PHOTON_MENU_A_HINT_K(t));
+    col += photon_menu_put_str(ui, col, hint_row, d1, PHOTON_MENU_A_HINT(t));
+    col += photon_menu_put_str(ui, col, hint_row, k2, PHOTON_MENU_A_HINT_K(t));
+    col += photon_menu_put_str(ui, col, hint_row, d2, PHOTON_MENU_A_HINT(t));
+    col += photon_menu_put_str(ui, col, hint_row, k3, PHOTON_MENU_A_HINT_K(t));
+    col += photon_menu_put_str(ui, col, hint_row, d3, PHOTON_MENU_A_HINT(t));
     (void)col;
 
     draw_statusbar(ui, false, NULL);
@@ -557,6 +469,11 @@ static void run_settings(photon_ui_t *ui, photon_settings_t *s)
 
         photon_key_t key = {0};
         if (!photon_sdl_wait_key(photon_ui_sdl(ui), &key, 100)) {
+            int nc = 0, nr = 0;
+            if (photon_sdl_check_resize(photon_ui_sdl(ui), &nc, &nr)) {
+                vte_resize(photon_ui_vte(ui), nc, nr);
+                redraw = true;
+            }
             if (photon_sdl_take_expose(photon_ui_sdl(ui)))
                 redraw = true;
             continue;
@@ -891,7 +808,13 @@ static photon_bbs_t *run_directory(photon_ui_t *ui, photon_settings_t *s,
 
         photon_key_t key = {0};
         if (!photon_sdl_wait_key(photon_ui_sdl(ui), &key, 100)) {
-            /* Check for window expose/resize while idle */
+            /* Check for window resize while idle */
+            int nc = 0, nr = 0;
+            if (photon_sdl_check_resize(photon_ui_sdl(ui), &nc, &nr)) {
+                vte_resize(photon_ui_vte(ui), nc, nr);
+                photon_sdl_repaint(photon_ui_sdl(ui), photon_ui_vte(ui));
+                redraw = true;
+            }
             if (photon_sdl_take_expose(photon_ui_sdl(ui)))
                 redraw = true;
             continue;
@@ -1065,6 +988,12 @@ photon_bbs_t *photon_bbslist_run(photon_ui_t *ui, bool start_in_directory,
 
             photon_key_t key = {0};
             if (!photon_sdl_wait_key(photon_ui_sdl(ui), &key, 200)) {
+                int nc = 0, nr = 0;
+                if (photon_sdl_check_resize(photon_ui_sdl(ui), &nc, &nr)) {
+                    vte_resize(photon_ui_vte(ui), nc, nr);
+                    photon_sdl_repaint(photon_ui_sdl(ui), photon_ui_vte(ui));
+                    redraw_splash = true;
+                }
                 if (photon_sdl_take_expose(photon_ui_sdl(ui)))
                     redraw_splash = true;
                 continue;

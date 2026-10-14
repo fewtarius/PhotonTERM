@@ -39,7 +39,7 @@ typedef enum {
     PHOTON_TERM_MODE_UTF8  = 2,  /* force TTF Unicode */
 } photon_term_mode_t;
 
-#define PHOTON_FINGERPRINT_LEN 20
+#define PHOTON_FINGERPRINT_LEN 32
 
 typedef struct {
     char     name[PHOTON_BBS_NAME_MAX + 1];

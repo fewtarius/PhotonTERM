@@ -26,10 +26,12 @@
 #ifdef _WIN32
 # include <windows.h>
 # include <process.h>
+# include <io.h>
 # define photon_getpid() ((int)_getpid())
 #else
 # include <pthread.h>
 # include <unistd.h>
+# include <sys/stat.h>
 # define photon_getpid() ((int)getpid())
 #endif
 
@@ -54,6 +56,7 @@ extern FILE *photon_debug_fp;
 static inline void
 photon_debug_open(void)
 {
+    if (photon_debug_fp) return; /* already opened - avoid truncating */
 	char path[512];
 #ifdef _WIN32
 	char tmpdir[MAX_PATH];
@@ -67,6 +70,11 @@ photon_debug_open(void)
 #endif
 	photon_debug_fp = fopen(path, "w");
 	if (photon_debug_fp) {
+#ifndef _WIN32
+		/* Restrict to owner-only — the log may contain BBS addresses,
+		 * SSH key paths, and other sensitive connection details. */
+		fchmod(fileno(photon_debug_fp), 0600);
+#endif
 		setvbuf(photon_debug_fp, NULL, _IOLBF, 0); /* line-buffered */
 		fprintf(stderr, "[photonterm] debug log: %s\n", path);
 #ifdef _WIN32

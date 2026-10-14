@@ -161,16 +161,19 @@ endif
 # ── Target ─────────────────────────────────────────────────────────────
 ifeq ($(os),darwin)
   BINARY := $(OBJDIR)/photonterm
-  APPBUNDLE := $(OBJDIR)/PhotonTERM.app
 else ifdef win
   BINARY := $(OBJDIR)/photonterm.exe
 else
   BINARY := $(OBJDIR)/photonterm
 endif
 
+# APPBUNDLE is only used on macOS; defined unconditionally so the bundle
+# rule exists on all platforms (it's a no-op on non-Darwin).
+APPBUNDLE := $(OBJDIR)/PhotonTERM.app
+
 all: $(BINARY)
 ifeq ($(os),darwin)
-all: $(APPBUNDLE)
+all: bundle
 endif
 
 $(BINARY): $(OBJ)
@@ -179,12 +182,8 @@ $(BINARY): $(OBJ)
 	    $(SDL2_LDFLAGS) $(TTF_LDFLAGS) $(SSH2_LDFLAGS) \
 	    -lpthread -lm \
 	    -o $@
-ifeq ($(os),darwin)
-	$(MAKE) bundle BINARY=$(BINARY)
-endif
 
 # ── macOS app bundle ───────────────────────────────────────────────────
-APPBUNDLE := $(OBJDIR)/PhotonTERM.app
 bundle: $(BINARY)
 	mkdir -p $(APPBUNDLE)/Contents/MacOS
 	mkdir -p $(APPBUNDLE)/Contents/Resources

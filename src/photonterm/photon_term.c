@@ -89,10 +89,24 @@ static void draw_tab_bar(photon_sdl_t *sdl, const photon_tab_bar_t *tabbar,
 {
     if (!sdl || !tabbar || tabbar->ntabs < 1) return;
 
+    const photon_theme_t *t = photon_menu_theme();
+
+    /* Push theme palette so tab bar colors match the UI theme */
+    uint8_t pal_buf[768];
+    photon_theme_push_palette(sdl, pal_buf);
+
     int cols = photon_sdl_cols(sdl);
     int rows = photon_sdl_rows(sdl);
     int bar_row = rows;
     int col = 1;
+
+    /* Theme-derived color indices */
+    uint8_t bar_fg = t->lclr;   /* normal text fg */
+    uint8_t bar_bg = t->bclr;   /* window background */
+    uint8_t act_fg = t->lbclr;  /* selection bar fg */
+    uint8_t act_bg = t->lbbclr; /* selection bar bg */
+    uint8_t sep_fg = t->cclr;   /* dim/inactive fg */
+    uint8_t hint_fg = t->hclr;  /* highlight/accent fg */
 
     /* Connection type label for the active tab */
     const char *proto;
@@ -107,7 +121,7 @@ static void draw_tab_bar(photon_sdl_t *sdl, const photon_tab_bar_t *tabbar,
         char left[96];
         snprintf(left, sizeof(left), " %s  %s ", tabbar->names[0], proto);
         for (int j = 0; left[j] && col <= cols; j++, col++) {
-            vte_cell_t cell = { (uint32_t)(unsigned char)left[j], 7, 0, 0 };
+            vte_cell_t cell = { (uint32_t)(unsigned char)left[j], bar_fg, bar_bg, 0 };
             photon_sdl_draw_cell(sdl, col, bar_row, &cell);
         }
 
@@ -118,61 +132,87 @@ static void draw_tab_bar(photon_sdl_t *sdl, const photon_tab_bar_t *tabbar,
         if (start > col) {
             /* Fill gap with spaces */
             while (col < start) {
-                vte_cell_t sp = { ' ', 7, 0, 0 };
+                vte_cell_t sp = { ' ', bar_fg, bar_bg, 0 };
                 photon_sdl_draw_cell(sdl, col++, bar_row, &sp);
             }
         }
         for (int j = 0; hint[j] && col <= cols; j++, col++) {
-            vte_cell_t cell = { (uint32_t)(unsigned char)hint[j], 3, 0, 0 };
+            vte_cell_t cell = { (uint32_t)(unsigned char)hint[j], hint_fg, bar_bg, 0 };
             photon_sdl_draw_cell(sdl, col, bar_row, &cell);
         }
 
         while (col <= cols) {
-            vte_cell_t blank = { ' ', 7, 0, 0 };
+            vte_cell_t blank = { ' ', bar_fg, bar_bg, 0 };
             photon_sdl_draw_cell(sdl, col++, bar_row, &blank);
         }
-        return;
-    }
+    } else {
+        /* Multi-tab bar: 1:name* | 2:name | hints */
+        for (int i = 0; i < tabbar->ntabs && col <= cols; i++) {
+            char label[72];
+            snprintf(label, sizeof(label), " %d:%s%s ",
+                     i + 1, tabbar->names[i],
+                     tabbar->activity[i] ? "*" : "");
 
-    /* Multi-tab bar: 1:name* | 2:name | hints */
-    for (int i = 0; i < tabbar->ntabs && col <= cols; i++) {
-        char label[72];
-        snprintf(label, sizeof(label), " %d:%s%s ",
-                 i + 1, tabbar->names[i],
-                 tabbar->activity[i] ? "*" : "");
+            bool is_active = (i == tabbar->active);
+            uint8_t fg  = is_active ? act_fg : bar_fg;
+            uint8_t bg  = is_active ? act_bg : bar_bg;
+            uint8_t att = is_active ? VTE_ATTR_BOLD : 0;
 
-        bool is_active = (i == tabbar->active);
-        uint8_t fg  = is_active ? 15 : 7;
-        uint8_t bg  = is_active ?  4 : 0;
-        uint8_t att = is_active ? VTE_ATTR_BOLD : 0;
+            for (int j = 0; label[j] && col <= cols; j++, col++) {
+                vte_cell_t cell = { (uint32_t)(unsigned char)label[j], fg, bg, att };
+                photon_sdl_draw_cell(sdl, col, bar_row, &cell);
+            }
+            if (col <= cols) {
+                vte_cell_t sep = { '|', sep_fg, bar_bg, 0 };
+                photon_sdl_draw_cell(sdl, col++, bar_row, &sep);
+            }
+        }
 
-        for (int j = 0; label[j] && col <= cols; j++, col++) {
-            vte_cell_t cell = { (uint32_t)(unsigned char)label[j], fg, bg, att };
+        /* Hints (always visible for multi-tab; Alt-held adds more) */
+        const char *hint = alt_held ? " W=New  1-9=Switch " : " Alt=Switch ";
+        for (int j = 0; hint[j] && col <= cols; j++, col++) {
+            vte_cell_t cell = { (uint32_t)(unsigned char)hint[j], hint_fg, bar_bg, 0 };
             photon_sdl_draw_cell(sdl, col, bar_row, &cell);
         }
-        if (col <= cols) {
-            vte_cell_t sep = { '|', 8, 0, 0 };
-            photon_sdl_draw_cell(sdl, col++, bar_row, &sep);
+
+        while (col <= cols) {
+            vte_cell_t blank = { ' ', bar_fg, bar_bg, 0 };
+            photon_sdl_draw_cell(sdl, col++, bar_row, &blank);
         }
     }
 
-    /* Hints (always visible for multi-tab; Alt-held adds more) */
-    const char *hint = alt_held ? " W=New  1-9=Switch " : " Alt=Switch ";
-    for (int j = 0; hint[j] && col <= cols; j++, col++) {
-        vte_cell_t cell = { (uint32_t)(unsigned char)hint[j], 3, 0, 0 };
-        photon_sdl_draw_cell(sdl, col, bar_row, &cell);
-    }
-
-    while (col <= cols) {
-        vte_cell_t blank = { ' ', 7, 0, 0 };
-        photon_sdl_draw_cell(sdl, col++, bar_row, &blank);
-    }
+    photon_theme_pop_palette(sdl, pal_buf);
 }
 
 
 #define SEQ_MAX 8
 
 /* ── Mouse selection -> clipboard ───────────────────────────────────── */
+
+/* Encode a single codepoint to UTF-8 in the buffer.
+ * Returns the number of bytes written (1-4). */
+static int cp_to_utf8(char *out, Uint32 cp)
+{
+    if (cp < 0x80) {
+        out[0] = (char)cp;
+        return 1;
+    } else if (cp < 0x800) {
+        out[0] = (char)(0xC0 | (cp >> 6));
+        out[1] = (char)(0x80 | (cp & 0x3F));
+        return 2;
+    } else if (cp < 0x10000) {
+        out[0] = (char)(0xE0 | (cp >> 12));
+        out[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        out[2] = (char)(0x80 | (cp & 0x3F));
+        return 3;
+    } else {
+        out[0] = (char)(0xF0 | (cp >> 18));
+        out[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+        out[2] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        out[3] = (char)(0x80 | (cp & 0x3F));
+        return 4;
+    }
+}
 
 static void copy_selection_to_clipboard(vte_t *vte, photon_sdl_t *sdl)
 {
@@ -199,21 +239,7 @@ static void copy_selection_to_clipboard(vte_t *vte, photon_sdl_t *sdl)
             Uint32 cp = ' ';
             if (vte_get_cell(vte, c + 1, r + 1, &cell) && cell.codepoint >= 0x20)
                 cp = cell.codepoint;
-            if (cp < 0x80) {
-                buf[pos++] = (char)cp;
-            } else if (cp < 0x800) {
-                buf[pos++] = (char)(0xC0 | (cp >> 6));
-                buf[pos++] = (char)(0x80 | (cp & 0x3F));
-            } else if (cp < 0x10000) {
-                buf[pos++] = (char)(0xE0 | (cp >> 12));
-                buf[pos++] = (char)(0x80 | ((cp >> 6) & 0x3F));
-                buf[pos++] = (char)(0x80 | (cp & 0x3F));
-            } else {
-                buf[pos++] = (char)(0xF0 | (cp >> 18));
-                buf[pos++] = (char)(0x80 | ((cp >> 12) & 0x3F));
-                buf[pos++] = (char)(0x80 | ((cp >> 6) & 0x3F));
-                buf[pos++] = (char)(0x80 | (cp & 0x3F));
-            }
+            pos += cp_to_utf8(buf + pos, cp);
         }
         if (r < r1 && pos + 1 < bufsz) buf[pos++] = '\n';
     }
@@ -254,7 +280,9 @@ static int key_to_bytes(const photon_key_t *k, uint8_t *out)
             case '0': case ')': out[0] = '\x10'; return 1;
             case '-': case '_': out[0] = '\x1f'; return 1;
             case '=':           out[0] = '\x1f'; return 1;
+            case ']':           out[0] = '\x1d'; return 1;
             case '`':           out[0] = '\x00'; return 1;
+            case '\\':          out[0] = '\x1c'; return 1;
             case ' ':           out[0] = '\x00'; return 1;
             default: break;
         }
@@ -399,6 +427,11 @@ static session_menu_result_t show_session_menu(photon_ui_t *ui,
         if (!photon_sdl_wait_key(sdl, &key, 100)) {
             if (photon_sdl_take_expose(sdl))
                 redraw = true;
+            int nc = 0, nr = 0;
+            if (photon_sdl_check_resize(sdl, &nc, &nr)) {
+                vte_resize(photon_ui_vte(ui), nc, nr);
+                redraw = true;
+            }
             continue;
         }
         if (key.code == 0) continue;
@@ -475,21 +508,7 @@ static void sb_copy_selection(vte_t *vte, photon_sdl_t *sdl,
             if (sb_get_cell(vte, abs_line, c, sb_lines, cols, row_buf, &cell)
                 && cell.codepoint >= 0x20)
                 cp = cell.codepoint;
-            if (cp < 0x80) {
-                buf[pos++] = (char)cp;
-            } else if (cp < 0x800) {
-                buf[pos++] = (char)(0xC0 | (cp >> 6));
-                buf[pos++] = (char)(0x80 | (cp & 0x3F));
-            } else if (cp < 0x10000) {
-                buf[pos++] = (char)(0xE0 | (cp >> 12));
-                buf[pos++] = (char)(0x80 | ((cp >> 6) & 0x3F));
-                buf[pos++] = (char)(0x80 | (cp & 0x3F));
-            } else {
-                buf[pos++] = (char)(0xF0 | (cp >> 18));
-                buf[pos++] = (char)(0x80 | ((cp >> 12) & 0x3F));
-                buf[pos++] = (char)(0x80 | ((cp >> 6) & 0x3F));
-                buf[pos++] = (char)(0x80 | (cp & 0x3F));
-            }
+            pos += cp_to_utf8(buf + pos, cp);
         }
         if (r < er && pos + 1 < bufsz) buf[pos++] = '\n';
     }
@@ -525,8 +544,14 @@ static void run_scrollback_viewer(vte_t *vte, photon_sdl_t *sdl)
     bool redraw = true;
     bool done   = false;
 
-    vte_cell_t sb_bar_bg = { ' ', 15, 4, VTE_ATTR_BOLD };
     vte_cell_t blank = { ' ', VTE_COLOR_DEFAULT_FG, VTE_COLOR_DEFAULT_BG, 0 };
+
+    const photon_theme_t *t = photon_menu_theme();
+    /* Status bar cells use theme color indices; palette is pushed/popped
+     * around the bar drawing so theme RGB values are used, not the
+     * terminal's per-BBS palette. */
+    uint8_t sb_fg = t->lclr;
+    uint8_t sb_bg = t->bclr;
 
     photon_sdl_clear_selection(sdl);
 
@@ -562,11 +587,17 @@ static void run_scrollback_viewer(vte_t *vte, photon_sdl_t *sdl)
                      " SCROLLBACK  %d/%d  Arrows  PgUp/Dn  Wheel  Home/End  ESC=exit",
                      scroll_top + 1, total);
             int slen = (int)strlen(status);
+
+            /* Push theme palette so status bar colors are theme-derived,
+             * not the terminal's per-BBS palette */
+            uint8_t pal_buf[768];
+            photon_theme_push_palette(sdl, pal_buf);
             for (int c = 0; c < cols; c++) {
-                vte_cell_t cell = sb_bar_bg;
+                vte_cell_t cell = { ' ', sb_fg, sb_bg, VTE_ATTR_BOLD };
                 if (c < slen) cell.codepoint = (unsigned char)status[c];
                 photon_sdl_draw_cell(sdl, c + 1, rows, &cell);
             }
+            photon_theme_pop_palette(sdl, pal_buf);
             photon_sdl_present(sdl);
             redraw = false;
         }
@@ -581,6 +612,33 @@ static void run_scrollback_viewer(vte_t *vte, photon_sdl_t *sdl)
             continue;
         }
         if (ev.type == SDL_QUIT) { done = true; break; }
+
+        if (ev.type == SDL_WINDOWEVENT) {
+            if (ev.window.event == SDL_WINDOWEVENT_RESIZED ||
+                ev.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
+                photon_sdl_recalc_grid(sdl);
+                int nc = 0, nr = 0;
+                if (photon_sdl_check_resize(sdl, &nc, &nr)) {
+                    cols = nc;
+                    rows = nr;
+                    cell_w = photon_sdl_cell_width(sdl);
+                    cell_h = photon_sdl_cell_height(sdl);
+                    retina_scale = photon_sdl_get_retina_scale(sdl);
+                    visible = rows - 1;
+                    if (visible < 1) visible = 1;
+                    free(row_buf);
+                    row_buf = calloc((size_t)cols, sizeof(vte_cell_t));
+                    if (!row_buf) return;
+                    int max_top = total - visible;
+                    if (max_top < 0) max_top = 0;
+                    if (scroll_top > max_top) scroll_top = max_top;
+                    if (scroll_top < 0) scroll_top = 0;
+                    redraw = true;
+                }
+            }
+            if (ev.window.event == SDL_WINDOWEVENT_EXPOSED)
+                redraw = true;
+        }
 
         int prev_top = scroll_top;
 
@@ -803,9 +861,12 @@ photon_term_result_t photon_term_handle_key(const photon_key_t *k,
             case SESSION_MENU_SETTINGS:
                 if (settings) {
                     uint8_t settings_pal[768];
+                    bool was_ttf = photon_sdl_get_ttf_mode(sdl);
+                    photon_sdl_set_ttf_mode(sdl, false);
                     photon_theme_push_palette(sdl, settings_pal);
                     photon_bbslist_run_settings(ui, settings);
                     photon_theme_pop_palette(sdl, settings_pal);
+                    photon_sdl_set_ttf_mode(sdl, was_ttf);
                     photon_sdl_apply_palette_mode(sdl, ses_pm,
                         bbs ? bbs->conn_type : PHOTON_CONN_TELNET);
                 }

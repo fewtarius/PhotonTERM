@@ -152,6 +152,8 @@ struct vte {
     int     saved_cx, saved_cy;
     uint8_t saved_fg, saved_bg, saved_attr;
     uint32_t saved_fg_rgb, saved_bg_rgb;
+    bool saved_g0_linedraw, saved_using_g1, saved_insert_mode;
+    bool saved_lnm, saved_app_cursor, saved_autowrap;
 
     /* Scroll region (1-based, inclusive) */
     int margin_top;
@@ -804,6 +806,12 @@ static void dispatch_csi(vte_t *v, uint8_t final)
         v->saved_attr = v->attr;
         v->saved_fg_rgb = v->fg_rgb;
         v->saved_bg_rgb = v->bg_rgb;
+        v->saved_g0_linedraw = v->g0_linedraw;
+        v->saved_using_g1 = v->using_g1;
+        v->saved_insert_mode = v->insert_mode;
+        v->saved_lnm = v->lnm;
+        v->saved_app_cursor = v->app_cursor;
+        v->saved_autowrap = v->autowrap;
         break;
     case 'u': /* DECRC */
         v->cx   = v->saved_cx ? v->saved_cx : 1;
@@ -813,6 +821,12 @@ static void dispatch_csi(vte_t *v, uint8_t final)
         v->attr = v->saved_attr;
         v->fg_rgb = v->saved_fg_rgb;
         v->bg_rgb = v->saved_bg_rgb;
+        v->g0_linedraw = v->saved_g0_linedraw;
+        v->using_g1 = v->saved_using_g1;
+        v->insert_mode = v->saved_insert_mode;
+        v->lnm = v->saved_lnm;
+        v->app_cursor = v->saved_app_cursor;
+        v->autowrap = v->saved_autowrap;
         clamp_cursor(v);
         v->pending_wrap = false;
         break;
@@ -844,26 +858,38 @@ static void dispatch_esc(vte_t *v, uint8_t final)
 {
     if (v->ninter == 0) {
         switch (final) {
-        case '7': /* DECSC - save cursor */
-            v->saved_cx   = v->cx;
-            v->saved_cy   = v->cy;
-            v->saved_fg   = v->fg;
-            v->saved_bg   = v->bg;
-            v->saved_attr = v->attr;
-            v->saved_fg_rgb = v->fg_rgb;
-            v->saved_bg_rgb = v->bg_rgb;
-            break;
-        case '8': /* DECRC - restore cursor */
-            v->cx   = v->saved_cx ? v->saved_cx : 1;
-            v->cy   = v->saved_cy ? v->saved_cy : 1;
-            v->fg   = v->saved_fg;
-            v->bg   = v->saved_bg;
-            v->attr = v->saved_attr;
-            v->fg_rgb = v->saved_fg_rgb;
-            v->bg_rgb = v->saved_bg_rgb;
-            clamp_cursor(v);
-            v->pending_wrap = false;
-            break;
+       case '7': /* DECSC - save cursor */
+           v->saved_cx   = v->cx;
+           v->saved_cy   = v->cy;
+           v->saved_fg   = v->fg;
+           v->saved_bg   = v->bg;
+           v->saved_attr = v->attr;
+           v->saved_fg_rgb = v->fg_rgb;
+           v->saved_bg_rgb = v->bg_rgb;
+           v->saved_g0_linedraw = v->g0_linedraw;
+           v->saved_using_g1 = v->using_g1;
+           v->saved_insert_mode = v->insert_mode;
+           v->saved_lnm = v->lnm;
+           v->saved_app_cursor = v->app_cursor;
+           v->saved_autowrap = v->autowrap;
+           break;
+       case '8': /* DECRC - restore cursor */
+           v->cx   = v->saved_cx ? v->saved_cx : 1;
+           v->cy   = v->saved_cy ? v->saved_cy : 1;
+           v->fg   = v->saved_fg;
+           v->bg   = v->saved_bg;
+           v->attr = v->saved_attr;
+           v->fg_rgb = v->saved_fg_rgb;
+           v->bg_rgb = v->saved_bg_rgb;
+           v->g0_linedraw = v->saved_g0_linedraw;
+           v->using_g1 = v->saved_using_g1;
+           v->insert_mode = v->saved_insert_mode;
+           v->lnm = v->saved_lnm;
+           v->app_cursor = v->saved_app_cursor;
+           v->autowrap = v->saved_autowrap;
+           clamp_cursor(v);
+           v->pending_wrap = false;
+           break;
         case 'D': /* IND - index (scroll down one) */
             if (v->cy == v->margin_bot) {
                 bool blit_ok = scroll_up(v, 1);
@@ -1001,12 +1027,20 @@ static void parser_clear(vte_t *v)
     memset(v->inter,  0, sizeof(v->inter));
 }
 
-/* Accumulate a CSI parameter digit. */
+/* Accumulate a CSI parameter digit.  Guard against integer overflow —
+ * a malicious BBS can send hundreds of digits to overflow the int. */
 static void param_digit(vte_t *v, uint8_t digit)
 {
     if (v->nparams == 0) v->nparams = 1;
-    if (v->nparams <= MAX_PARAMS)
-        v->params[v->nparams - 1] = v->params[v->nparams - 1] * 10 + (digit - '0');
+    if (v->nparams <= MAX_PARAMS) {
+        int val = v->params[v->nparams - 1];
+        if (val > 200000000) {
+            /* Saturating: clamp to a large but safe value.  Real sequences
+             * never use values this large; this just prevents overflow. */
+            val = 200000000;
+        }
+        v->params[v->nparams - 1] = val * 10 + (digit - '0');
+    }
 }
 
 /* CSI parameter separator. */
@@ -1233,8 +1267,11 @@ static void feed_byte(vte_t *v, uint8_t b)
             if (v->osc_saw_esc) {
                 v->osc_saw_esc = false;
                 /* Stray ESC inside OSC - abort and reprocess */
+                /* Abort the OSC string and reprocess this byte as the
+                 * first character of a new escape sequence. */
                 v->state = ST_ESCAPE;
-                break;
+                feed_byte(v, b);
+                return;
             }
             if (v->osc_len < (int)sizeof(v->osc_buf) - 1)
                 v->osc_buf[v->osc_len++] = (char)b;
@@ -1332,6 +1369,14 @@ void vte_reset(vte_t *v, bool hard)
         v->cursor_visible = true;
         v->saved_cx = v->saved_cy = 0;
         v->last_printed.codepoint = 0;
+        /* Reset all mode state to initial (RIS = full reset) */
+        v->g0_linedraw = false;
+        v->using_g1 = false;
+        v->insert_mode = false;
+        v->lnm = true;        /* BBS default: LF = CR+LF */
+        v->app_cursor = false;
+        v->fg_rgb = 0;
+        v->bg_rgb = 0;
     }
     clear_cells_quiet(v, 1, 1, v->cols, v->rows);
     emit_clear(v, 1, 1, v->cols, v->rows);

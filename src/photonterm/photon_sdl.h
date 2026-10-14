@@ -116,12 +116,6 @@ void photon_sdl_draw_cursor(photon_sdl_t *ctx, int col, int row,
 
 /* Fill a rectangular region with blank cells using current background attr.
  * col1/row1 inclusive, col2/row2 inclusive, 1-based. */
-void photon_sdl_clear_rect(photon_sdl_t *ctx,
-                           int col1, int row1, int col2, int row2,
-                           uint8_t fg, uint8_t bg);
-
-/* Bulk fill: single SDL RenderFillRect + shadow update.
- * Much faster than per-cell draw_cell for uniform space-filled regions. */
 void photon_sdl_fill_rect(photon_sdl_t *ctx,
                           int col1, int row1, int col2, int row2,
                           uint8_t fg, uint8_t bg);
@@ -141,9 +135,6 @@ void photon_sdl_invalidate_range(photon_sdl_t *ctx, int r0, int r1);
 
 /* Show a "Connecting to <name> ..." splash on a blank screen. */
 void photon_sdl_show_connecting(photon_sdl_t *ctx, const char *bbs_name);
-
-/* Repaint from the shadow cell buffer (used for expose events). */
-void photon_sdl_repaint_shadow(photon_sdl_t *ctx);
 
 /* Check and clear the expose_pending flag.
    Returns true if the window needs a repaint (e.g. was uncovered). */
@@ -191,20 +182,18 @@ void photon_sdl_enter_fullscreen(photon_sdl_t *ctx);
  * Returns NULL if shadow is not allocated. */
 const vte_cell_t *photon_sdl_shadow_ptr(const photon_sdl_t *ctx);
 int photon_sdl_shadow_cols(const photon_sdl_t *ctx);
+int photon_sdl_shadow_rows(const photon_sdl_t *ctx);
 
 /* Physical pixel size of one cell. */
 int photon_sdl_cell_width(const photon_sdl_t *ctx);
 int photon_sdl_cell_height(const photon_sdl_t *ctx);
 
+void photon_sdl_recalc_grid(photon_sdl_t *ctx);
+
 /* Check for a pending window-driven resize (user dragged the window).
  * Returns true and stores new grid dimensions in nc and nr if changed.
  * Updates ctx->cols/rows and reallocates the shadow buffer. */
 bool photon_sdl_check_resize(photon_sdl_t *ctx, int *nc, int *nr);
-
-/* Notify ctx that the VTE has been resized to new_cols x new_rows.
- * Resizes the SDL window to match and repaints. */
-void photon_sdl_notify_resize(photon_sdl_t *ctx, vte_t *vte,
-                              int new_cols, int new_rows);
 
 /* ── Palette ──────────────────────────────────────────────────────────── */
 

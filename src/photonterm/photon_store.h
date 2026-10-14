@@ -25,6 +25,10 @@ int  photon_store_load(photon_bbs_t *entries, int max, char *path_out, size_t pa
  * Returns true on success. */
 bool photon_store_save(const photon_bbs_t *entries, int count);
 
+/* Update a single entry in the store (matching by name+addr+port+type).
+ * Loads, replaces/appends, and saves the full list.  Returns true on success. */
+bool photon_store_update_entry(const photon_bbs_t *entry);
+
 /* Returns the config directory path (~/.config/photonterm or ~/.photonterm).
  * Never returns NULL (falls back to "."). */
 const char *photon_store_config_dir(void);

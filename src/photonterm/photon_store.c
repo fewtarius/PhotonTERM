@@ -176,6 +176,19 @@ int photon_store_load(photon_bbs_t *entries, int max, char *path_out, size_t pat
 
 /* ── INI writer ─────────────────────────────────────────────────────── */
 
+/* Write a string field to the INI file, stripping any embedded newlines
+ * that would corrupt the file format. */
+static void ini_write_str(FILE *f, const char *key, const char *val)
+{
+    fputs(key, f);
+    fputs("=", f);
+    for (const char *p = val; *p; p++) {
+        if (*p == '\n' || *p == '\r') continue;
+        fputc(*p, f);
+    }
+    fputc('\n', f);
+}
+
 bool photon_store_save(const photon_bbs_t *entries, int count)
 {
     char path[PATH_MAX];
@@ -187,7 +200,7 @@ bool photon_store_save(const photon_bbs_t *entries, int count)
     strlcpy(tmp, path, sizeof(tmp));
     strlcat(tmp, ".tmp", sizeof(tmp));
 
-    FILE *f = fopen(tmp, "w");
+    FILE *f = fopen_secure(tmp);
     if (!f) return false;
 
     fprintf(f, "; PhotonTERM dialing directory\n");
@@ -199,15 +212,15 @@ bool photon_store_save(const photon_bbs_t *entries, int count)
         const photon_bbs_t *e = &entries[i];
         hex_encode(fphex, e->ssh_fingerprint, PHOTON_FINGERPRINT_LEN);
         fprintf(f, "[%d]\n",               i);
-        fprintf(f, "name=%s\n",            e->name);
-        fprintf(f, "addr=%s\n",            e->addr);
+        ini_write_str(f, "name",          e->name);
+        ini_write_str(f, "addr",          e->addr);
         fprintf(f, "port=%u\n",            e->port);
         fprintf(f, "conn_type=%d\n",       (int)e->conn_type);
         fprintf(f, "term_mode=%d\n",       (int)e->term_mode);
-    fprintf(f, "palette_mode=%d\n",  (int)e->palette_mode);
-    fprintf(f, "user=%s\n",            e->user);
-        fprintf(f, "pass=%s\n",            e->pass);
-        fprintf(f, "comment=%s\n",         e->comment);
+        fprintf(f, "palette_mode=%d\n",    (int)e->palette_mode);
+        ini_write_str(f, "user",          e->user);
+        ini_write_str(f, "pass",          e->pass);
+        ini_write_str(f, "comment",       e->comment);
         fprintf(f, "added=%lld\n",         (long long)e->added);
         fprintf(f, "last_connected=%lld\n", (long long)e->last_connected);
         fprintf(f, "calls=%u\n",           e->calls);
@@ -222,4 +235,35 @@ bool photon_store_save(const photon_bbs_t *entries, int count)
         return false;
     }
     return true;
+}
+
+/* Update a single entry in the store, matching by name+addr+port+conn_type.
+ * Loads the full list, replaces the matching entry, and saves. */
+bool photon_store_update_entry(const photon_bbs_t *entry)
+{
+    if (!entry) return false;
+
+    photon_bbs_t list[MAX_BBS_ENTRIES];
+    int count = photon_store_load(list, MAX_BBS_ENTRIES, NULL, 0);
+    if (count < 0) count = 0;
+
+    int found = -1;
+    for (int i = 0; i < count; i++) {
+        if (strcmp(list[i].name, entry->name) == 0 &&
+            strcmp(list[i].addr, entry->addr) == 0 &&
+            list[i].port == entry->port &&
+            list[i].conn_type == entry->conn_type) {
+            found = i;
+            break;
+        }
+    }
+    if (found < 0) {
+        /* Entry doesn't exist yet — append if there's room */
+        if (count >= MAX_BBS_ENTRIES) return false;
+        found = count++;
+    }
+
+    list[found] = *entry;
+    list[found].id = found;
+    return photon_store_save(list, count);
 }

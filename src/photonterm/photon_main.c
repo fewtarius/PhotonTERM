@@ -17,6 +17,7 @@
 #include "photon_ui.h"
 #include "photon_bbslist.h"
 #include "photon_conn.h"
+#include "photon_store.h"
 #include "photon_term.h"
 #include "photon_settings.h"
 
@@ -76,11 +77,37 @@ static bool ssh_password_prompt(const char *prompt, char *out, size_t outsz,
     return len > 0;
 }
 
+/* SSH host key verification callback: shows the user the fingerprint and
+ * asks whether to accept it.  first_seen=true means this is the first
+ * connection to this host (no stored fingerprint).  first_seen=false
+ * means the stored fingerprint doesn't match (key may have changed). */
+static bool ssh_hostkey_prompt(const char *host, const char *fingerprint_hex,
+                                bool first_seen, void *userdata)
+{
+    (void)userdata;
+    if (!photon_ui_global) return false;
+
+    char msg[512];
+    if (first_seen)
+        snprintf(msg, sizeof(msg),
+                 "No stored host key for %s.\n\n"
+                 "Fingerprint (SHA-256): %s\n\n"
+                 "Accept and connect?", host, fingerprint_hex);
+    else
+        snprintf(msg, sizeof(msg),
+                 "WARNING: Host key for %s has changed!\n\n"
+                 "New fingerprint (SHA-256): %s\n\n"
+                 "This could indicate a man-in-the-middle attack.\n"
+                 "Connect anyway?", host, fingerprint_hex);
+
+    return photon_ui_confirm(photon_ui_global, msg);
+}
+
 /* Global quit flag - used by DarwinWrappers.m (Ctrl-C / window close). */
 bool quitting = false;
 
 /* Version string - updated by scripts/release.sh */
-const char *photonterm_version = "PhotonTERM 20260830.1";
+const char *photonterm_version = "PhotonTERM 20261012.1";
 
 /* ── Signal handling ─────────────────────────────────────────────────── */
 
@@ -314,6 +341,11 @@ static int create_and_connect_tab(photon_sdl_t *sdl, photon_ui_t *ui,
         return -1;
     }
 
+    /* Persist BBS entry if connection stored/updated the SSH fingerprint.
+     * Only the active tab's bbs is modified during connect. */
+    if (bbs->has_fingerprint)
+        photon_store_update_entry(bbs);
+
     PHOTON_DBG("tab %d: connected", slot);
     return slot;
 }
@@ -349,7 +381,18 @@ int main(int argc, char **argv)
     }
     PHOTON_DBG("SDL_Init OK");
 
-    photon_sdl_t *sdl = photon_sdl_create("PhotonTERM", 80, 24, NULL, 32);
+    photon_settings_t settings;
+    photon_settings_load(&settings);
+
+    int init_cols = (settings.cols > 0) ? settings.cols : 80;
+    int init_rows = (settings.rows > 0) ? settings.rows : 24;
+    int init_font_pt = settings.ttf_size_pt;
+    if (init_font_pt <= 0) init_font_pt = 18;
+    const char *init_font_path =
+        (settings.ttf_path[0]) ? settings.ttf_path : NULL;
+
+    photon_sdl_t *sdl = photon_sdl_create("PhotonTERM", init_cols, init_rows,
+                                          init_font_path, init_font_pt);
     if (!sdl) {
         fprintf(stderr, "photon_sdl_create failed: %s\n",
                 photon_sdl_last_error());
@@ -358,6 +401,8 @@ int main(int argc, char **argv)
     }
     photon_sdl_global = sdl;
     PHOTON_DBG("SDL context created");
+
+    photon_sdl_set_fixed_size(sdl, settings.cols, settings.rows);
 
     if (start_fullscreen)
         photon_sdl_enter_fullscreen(sdl);
@@ -383,16 +428,18 @@ int main(int argc, char **argv)
     }
     photon_ui_global = ui;
     photon_conn_set_ssh_prompt(ssh_password_prompt, NULL);
+    photon_conn_set_hostkey_cb(ssh_hostkey_prompt, NULL);
     PHOTON_DBG("UI context created");
 
-    photon_settings_t settings;
-    photon_settings_load(&settings);
-    photon_sdl_set_fixed_size(sdl, settings.cols, settings.rows);
     {
         int tidx = photon_theme_find(settings.theme_name);
         photon_theme_apply(tidx >= 0 ? tidx : 0, sdl, &settings);
     }
     g_bell_enabled = settings.bell_enabled;
+    if (settings.debug) {
+        photon_debug_enabled = true;
+        photon_debug_open();
+    }
 
     /* ── State machine ────────────────────────────────────────────────── */
     memset(tabs, 0, sizeof(tabs));
@@ -499,7 +546,8 @@ int main(int argc, char **argv)
                     close_tab(sdl, dead);
                     photon_theme_apply(photon_active_theme, sdl, &settings);
                     if (ntabs == 0) {
-                        vte_resize(ui_vte, photon_sdl_cols(sdl), photon_sdl_rows(sdl));
+                        vte_resize(ui_vte, photon_sdl_cols(sdl),
+                                   photon_sdl_rows(sdl) - 1);
                         photon_sdl_set_ttf_mode(sdl, false);
                         show_directory = true;
                         state = STATE_DIRECTORY;
@@ -512,7 +560,7 @@ int main(int argc, char **argv)
                 case PHOTON_TERM_NEWTAB:
                     photon_theme_apply(photon_active_theme, sdl, &settings);
                     photon_sdl_set_ttf_mode(sdl, false);
-                    vte_resize(ui_vte, photon_sdl_cols(sdl), photon_sdl_rows(sdl));
+                    vte_resize(ui_vte, photon_sdl_cols(sdl), photon_sdl_rows(sdl) - 1);
                     show_directory = true;
                     state = STATE_DIRECTORY;
                     break;
@@ -592,7 +640,7 @@ int main(int argc, char **argv)
                         photon_theme_apply(photon_active_theme, sdl, &settings);
                         if (ntabs == 0) {
                             vte_resize(ui_vte, photon_sdl_cols(sdl),
-                                       photon_sdl_rows(sdl));
+                                       photon_sdl_rows(sdl) - 1);
                             photon_sdl_set_ttf_mode(sdl, false);
                             show_directory = true;
                             state = STATE_DIRECTORY;

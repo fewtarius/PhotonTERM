@@ -33,6 +33,8 @@ bool photon_xfer_run(photon_conn_t *conn, photon_sdl_t *sdl, photon_ui_t *ui)
 #include "photon_sdl.h"
 #include "photon_vte.h"
 #include "photon_ui.h"
+#include "photon_menu.h"
+#include "photon_settings.h"
 #include "photon_compat.h"
 #include "photon_debug.h"
 
@@ -66,9 +68,16 @@ static void draw_xfer_status(photon_sdl_t *sdl,
     int rows = photon_sdl_rows(sdl);
     if (cols < 10 || rows < 3) return;
 
-    /* bg1: white text on dark cyan; bg2: white text on dark blue */
-    vte_cell_t bg1 = { ' ', 7, 6, 0 };  /* fg=white, bg=cyan  */
-    vte_cell_t bg2 = { ' ', 7, 4, 0 };  /* fg=white, bg=blue  */
+    const photon_theme_t *t = photon_menu_theme();
+
+    /* Push theme palette so overlay colors match the UI theme */
+    uint8_t pal_buf[768];
+    photon_theme_push_palette(sdl, pal_buf);
+
+    /* Theme-derived colors: fg=text, bg=window bg for row 1;
+     * fg=highlight, bg=selection for row 2 */
+    vte_cell_t bg1 = { ' ', t->lclr, t->bclr, 0 };
+    vte_cell_t bg2 = { ' ', t->lbclr, t->lbbclr, 0 };
 
     const char *lines[2] = { line1, line2 };
     vte_cell_t  bgs[2]   = { bg1, bg2 };
@@ -84,6 +93,7 @@ static void draw_xfer_status(photon_sdl_t *sdl,
             photon_sdl_draw_cell(sdl, c + 1, row + 1, &cell);
         }
     }
+    photon_theme_pop_palette(sdl, pal_buf);
     photon_sdl_present(sdl);
 }
 

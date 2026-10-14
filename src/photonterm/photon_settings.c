@@ -7,7 +7,6 @@
 #include "photon_settings.h"
 #include "photon_sdl.h"
 #include "photon_store.h"
-#include "photon_ui.h"
 #include "photon_compat.h"
 
 #include <stdio.h>
@@ -142,22 +141,6 @@ void photon_theme_apply(int idx, struct photon_sdl *sdl,
 
     /* Save theme name to settings */
     if (s) strlcpy(s->theme_name, t->name, sizeof(s->theme_name));
-
-    /* Sync the global UI widget colour scheme to match */
-    if (photon_ui_global) {
-        photon_ui_colors_t c = {
-            .border_fg = t->hclr,
-            .border_bg = t->bclr,
-            .title_fg  = t->lclr,
-            .normal_fg = t->lclr,
-            .normal_bg = t->bclr,
-            .hilite_fg = t->lbclr,
-            .hilite_bg = t->lbbclr,
-            .input_fg  = t->hclr,
-            .input_bg  = t->bclr,
-        };
-        photon_ui_set_colors(photon_ui_global, &c);
-    }
 }
 
 void photon_sdl_reset_to_ansi_palette(struct photon_sdl *sdl)
@@ -289,7 +272,7 @@ bool photon_settings_save(const photon_settings_t *s)
     char tmp[PATH_MAX];
     strlcpy(tmp, path, sizeof(tmp));
     strlcat(tmp, ".tmp", sizeof(tmp));
-    FILE *f = fopen(tmp, "w");
+    FILE *f = fopen_secure(tmp);
     if (!f) return false;
 
     fprintf(f, "; PhotonTERM settings\n\n[photonterm]\n");

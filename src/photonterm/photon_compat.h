@@ -77,6 +77,24 @@
 #  define NULL ((void *)0)
 #endif
 
+/* ── Secure file open ────────────────────────────────────────────────── */
+/* Open a file for writing with 0600 permissions (owner read/write only).
+ * Returns a FILE* on success, NULL on failure.  On Windows this falls back
+ * to fopen("w") since ACL-based permissions are not directly mappable. */
+static inline FILE *fopen_secure(const char *path)
+{
+#ifdef _WIN32
+    return fopen(path, "w");
+#else
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) return NULL;
+    fchmod(fd, 0600);
+    FILE *f = fdopen(fd, "w");
+    if (!f) close(fd);
+    return f;
+#endif
+}
+
 /* ── Path ───────────────────────────────────────────────────────────── */
 
 #ifndef MAX_PATH
